@@ -83,6 +83,9 @@ app.whenReady().then(async () => {
       const sz = img.getSize();
       check(sz.width === size && sz.height === size, file + ' 尺寸 ' + sz.width + 'x' + sz.height);
 
+      const byteLen = fs.statSync(p).size;
+      check(byteLen < 100 * 1024, file + ' <100KB(实际 ' + (byteLen / 1024).toFixed(1) + 'KB)');
+
       if (type === '圆角') {
         const bmp = img.toBitmap(); // BGRA
         const alphaTL = bmp[3];

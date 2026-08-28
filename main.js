@@ -5,6 +5,7 @@ const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const fsp = fs.promises;
+const { compressImage } = require('./compress');
 
 const WINDOW_WIDTH = 460;
 const WINDOW_HEIGHT = 780;
@@ -82,11 +83,21 @@ ipcMain.handle('icon-app:save-files', async (event, files) => {
   const errors = [];
   for (const f of files) {
     const name = String(f.name || 'export.png');
-    const b64 = String(f.data || '');
     try {
+      const width = Number(f.width) || 0;
+      const height = Number(f.height) || 0;
+      const pixels = f.pixels;
+      // 校验像素数据完整(渲染层传的是 Uint8ClampedArray,结构化克隆后仍为视图)
+      const okView = pixels && typeof pixels.byteLength === 'number' && typeof pixels.byteOffset === 'number';
+      if (!okView || width <= 0 || height <= 0 || width * height * 4 !== pixels.byteLength) {
+        throw new Error('像素数据无效');
+      }
+      const rgba = Buffer.from(pixels.buffer, pixels.byteOffset, pixels.byteLength);
+      // 中位切分量化 + 调色板 PNG,压到 <100KB
+      const buf = compressImage(width, height, rgba);
       const target = uniquePath(dir, name);
-      await fsp.writeFile(target, Buffer.from(b64, 'base64'));
-      saved.push({ name: path.basename(target), path: target });
+      await fsp.writeFile(target, buf);
+      saved.push({ name: path.basename(target), path: target, size: buf.length });
     } catch (err) {
       errors.push({ name, message: err.message || String(err) });
     }

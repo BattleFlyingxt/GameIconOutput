@@ -130,16 +130,13 @@ function renderRound(img, size) {
   return canvas;
 }
 
-function canvasToBase64Png(canvas) {
-  return new Promise(function (resolve, reject) {
-    canvas.toBlob(function (blob) {
-      if (!blob) return reject(new Error('PNG 编码失败。'));
-      var reader = new FileReader();
-      reader.onload = function () { resolve(String(reader.result).split(',')[1]); };
-      reader.onerror = function () { reject(new Error('PNG 编码失败。')); };
-      reader.readAsDataURL(blob);
-    }, 'image/png');
-  });
+// 预览用图(缩略图 / 大图),压缩落盘交给主进程,这里只做展示
+function canvasToPreviewDataUrl(canvas) {
+  try {
+    return canvas.toDataURL('image/png');
+  } catch (err) {
+    return null;
+  }
 }
 
 function normalizeVariants(variants) {
@@ -181,19 +178,23 @@ async function onExport() {
     for (var i = 0; i < variants.length; i++) {
       var v = variants[i];
       var canvas = v.type === '圆角' ? renderRound(img, v.size) : renderStraight(img, v.size);
-      var b64 = await canvasToBase64Png(canvas);
+      var ctx = canvas.getContext('2d');
+      // 原始 RGBA 交给主进程做调色板量化压缩;预览用 PNG
+      var imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       items.push({
         name: gameName + '-' + v.size + ' ' + v.type + '.png',
         type: v.type,
         size: v.size,
-        data: b64,
-        dataUrl: 'data:image/png;base64,' + b64,
-        bytes: Math.round((b64.length / 4) * 3)
+        width: canvas.width,
+        height: canvas.height,
+        pixels: imgData.data,
+        dataUrl: canvasToPreviewDataUrl(canvas),
+        bytes: canvas.width * canvas.height * 4
       });
     }
 
     var res = await window.iconApp.saveFiles(items.map(function (it) {
-      return { name: it.name, data: it.data };
+      return { name: it.name, width: it.width, height: it.height, pixels: it.pixels };
     }));
 
     if (!res) throw new Error('无法调用保存功能,应用可能已损坏。');
@@ -205,9 +206,13 @@ async function onExport() {
     if (!res.ok) throw new Error(res.message || '保存失败,请重试。');
 
     lastSavedDir = res.dir;
-    var pathByName = {};
-    (res.saved || []).forEach(function (s) { pathByName[s.name] = s.path; });
-    items.forEach(function (it) { it.savedPath = pathByName[it.name] || null; });
+    var savedByName = {};
+    (res.saved || []).forEach(function (s) { savedByName[s.name] = s; });
+    items.forEach(function (it) {
+      var s = savedByName[it.name];
+      it.savedPath = s ? s.path : null;
+      if (s && s.size) it.bytes = s.size; // 用落盘后的真实字节数(压缩后)
+    });
 
     renderResults(items);
     var msg = '已保存 ' + res.saved.length + ' 张 PNG 到 ' + res.dir;

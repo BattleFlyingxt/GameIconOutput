@@ -11,6 +11,7 @@
 - 勾选需要的规格(默认全选):直角 216 / 256 / 258 / 320 / 512 + 圆角 222
 - 导出后选择保存目录,一次性批量写入全部 PNG
 - 直角 = 内容填满整个分辨率;圆角 = 内容切成正圆形、圆外透明
+- 每张导出都压到 **100KB 以下**(调色板量化,图标观感几乎无损)
 - 结果卡片可查看大图、打开所在目录
 - 自动适配系统深色 / 浅色主题
 
@@ -78,11 +79,13 @@ build/icon.png      应用图标
 .github/workflows/build.yml        push 到 main 时双平台自动构建(Artifacts)
 .github/workflows/release.yml      打 v* 标签时出包并发布到 Releases
 .github/workflows/version-bump.yml 手动触发,升级版本号并打标签
+compress.js         调色板量化 + PNG 编码(压缩到 100KB 以下)
 verify.js           自动化验证脚本
 ```
 
 ## 技术要点
 
-- 像素级处理全部在渲染层用浏览器 Canvas 完成(cover 等比缩放 + 圆形蒙版裁切 + `toBlob` PNG 无损编码),与 Cindy 插件版同一套逻辑;
+- 像素级处理在渲染层用浏览器 Canvas 完成(cover 等比缩放 + 圆形蒙版裁切);
+- 压缩在主进程用纯 Node(zlib)实现:中位切分把颜色量化到 ≤256 色,编码为 8-bit 调色板 PNG,并按需写 `tRNS` 保留圆角透明与抗锯齿边缘——与 pngquant 同原理,逐档降色直到每张 <100KB;
 - 渲染层启用 `contextIsolation` + 关闭 `nodeIntegration` + CSP,与主进程只经 preload 暴露的 `saveFiles` / `showInFolder` 两个能力通信;
 - 同名文件自动追加 `-1` / `-2` 后缀,不会覆盖已有素材。

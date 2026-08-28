@@ -21,6 +21,7 @@
     "files": [
       "main.js",
       "preload.js",
+      "compress.js",
       "index.html",
       "renderer.js",
       "renderer.css"
