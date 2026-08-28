@@ -1,0 +1,78 @@
+name: Release
+
+# 打标签(v1.0.0 / v1.1.0 …)时自动构建两平台安装包,并发布到 GitHub Releases
+# 标签由「Bump Version」工作流或本地 `git tag` 产生
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            args: --win
+          - os: macos-latest
+            args: --mac
+    runs-on: ${{ matrix.os }}
+    env:
+      # 未签名,关闭自动发现签名证书,避免构建卡在找证书上
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build installer
+        run: npx electron-builder ${{ matrix.args }} --publish never
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.os }}
+          path: |
+            dist/*.exe
+            dist/*.dmg
+            dist/*.blockmap
+            dist/*.yml
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows installers
+        uses: actions/download-artifact@v4
+        with:
+          name: installers-windows-latest
+          path: release/windows
+
+      - name: Download macOS installers
+        uses: actions/download-artifact@v4
+        with:
+          name: installers-macos-latest
+          path: release/macos
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: 游戏图标导出 ${{ github.ref_name }}
+          tag_name: ${{ github.ref }}
+          files: |
+            release/windows/**
+            release/macos/**
+          generate_release_notes: true

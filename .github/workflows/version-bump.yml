@@ -1,0 +1,45 @@
+name: Bump Version
+
+# 在仓库 Actions 页手动触发:选 patch / minor / major 自动升级 package.json 版本号、
+# 提交到 main 并打 v* 标签。打标签后会自动触发 Release 工作流出安装包。
+
+on:
+  workflow_dispatch:
+    inputs:
+      level:
+        description: 版本增量(patch=小修复 / minor=新功能 / major=大版本)
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+jobs:
+  bump:
+    name: Bump version (${{ inputs.level }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump version & tag
+        run: npm version ${{ inputs.level }} --git-tag-version -m "chore: bump version to %s"
+
+      - name: Push commit and tag
+        run: |
+          git push origin main
+          git push origin --tags
