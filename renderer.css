@@ -1,0 +1,248 @@
+:root {
+  color-scheme: light;
+  --surface: #f7f7f5;
+  --surface-raised: #ffffff;
+  --text-primary: #1a1a1a;
+  --text-secondary: #666666;
+  --border-default: #e4e4e0;
+  --border-strong: #c8c8c4;
+  --accent: #2f6fed;
+  --accent-muted: #eef3ff;
+  --accent-text: #ffffff;
+  --danger: #c0392b;
+  --danger-muted: #fdecec;
+  --success: #1e8e3e;
+  --success-muted: #e7f6ec;
+  --overlay: rgba(0, 0, 0, 0.45);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --surface: #1e1e1e;
+    --surface-raised: #262626;
+    --text-primary: #ececec;
+    --text-secondary: #9a9a9a;
+    --border-default: #3a3a3a;
+    --border-strong: #555555;
+    --accent: #4d82f4;
+    --accent-muted: #2a3550;
+    --accent-text: #ffffff;
+    --danger: #e07b6d;
+    --danger-muted: #3a2320;
+    --success: #5fb878;
+    --success-muted: #1e3425;
+    --overlay: rgba(0, 0, 0, 0.6);
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--surface);
+}
+
+#app {
+  max-width: 460px;
+  margin: 0 auto;
+  padding: 18px 16px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.app-sub {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.dropzone {
+  border: 1.5px dashed var(--border-strong);
+  border-radius: 8px;
+  padding: 16px 12px;
+  min-height: 96px;
+  text-align: center;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  background: var(--surface-raised);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.dropzone.dragging {
+  border-color: var(--accent);
+  background: var(--accent-muted);
+}
+
+.dropzone img {
+  max-width: 100%;
+  max-height: 160px;
+  border-radius: 6px;
+}
+
+.field-label {
+  font-weight: 600;
+}
+
+input[type="text"] {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  color: inherit;
+}
+
+input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+fieldset {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: var(--surface-raised);
+}
+
+legend {
+  padding: 0 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.variant {
+  display: block;
+  padding: 3px 0;
+  cursor: pointer;
+}
+
+#exportBtn {
+  padding: 10px 0;
+  border: none;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#exportBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.status {
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.status.error {
+  background: var(--danger-muted);
+  color: var(--danger);
+}
+
+.status.ok {
+  background: var(--success-muted);
+  color: var(--success);
+}
+
+.results {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.result-item {
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--surface-raised);
+}
+
+.result-item .thumb {
+  display: block;
+  line-height: 0;
+  cursor: zoom-in;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.result-item .thumb img {
+  width: 100%;
+  display: block;
+}
+
+.result-item .name {
+  font-size: 11px;
+  line-height: 1.3;
+  word-break: break-all;
+}
+
+.result-item .meta {
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+.result-item .open {
+  margin-top: 2px;
+  padding: 4px 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.result-item .open:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.lightbox {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  align-items: center;
+  justify-content: center;
+  background: var(--overlay);
+  cursor: zoom-out;
+}
+
+.lightbox img {
+  max-width: 90vw;
+  max-height: 90vh;
+  border-radius: 8px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.4);
+}

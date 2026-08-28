@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self';">
+  <link rel="stylesheet" href="renderer.css">
+  <title>游戏图标导出</title>
+</head>
+<body>
+  <div id="app">
+    <header class="app-header">
+      <h1>游戏图标导出</h1>
+      <p class="app-sub">把游戏 ICON 批量导出成直角 / 圆角规格的 PNG,按游戏名命名</p>
+    </header>
+
+    <div id="dropzone" class="dropzone">
+      <input type="file" id="fileInput" accept="image/*" hidden>
+      <img id="preview" alt="" hidden>
+      <div id="dropHint">拖入图标图片,或点击选择</div>
+    </div>
+
+    <label class="field-label" for="gameName">游戏名称</label>
+    <input id="gameName" type="text" placeholder="例:原神 → 原神-216 直角.png">
+
+    <fieldset id="variants">
+      <legend>导出规格(默认全选)</legend>
+      <label class="variant"><input type="checkbox" data-size="216" data-type="直角" checked> 直角 216×216</label>
+      <label class="variant"><input type="checkbox" data-size="256" data-type="直角" checked> 直角 256×256</label>
+      <label class="variant"><input type="checkbox" data-size="258" data-type="直角" checked> 直角 258×258</label>
+      <label class="variant"><input type="checkbox" data-size="320" data-type="直角" checked> 直角 320×320</label>
+      <label class="variant"><input type="checkbox" data-size="512" data-type="直角" checked> 直角 512×512</label>
+      <label class="variant"><input type="checkbox" data-size="222" data-type="圆角" checked> 圆角 222×222</label>
+    </fieldset>
+
+    <button id="exportBtn">导出 PNG</button>
+    <div id="status" class="status" hidden></div>
+    <div id="results" class="results"></div>
+  </div>
+  <script src="renderer.js"></script>
+</body>
+</html>

@@ -1,0 +1,47 @@
+name: Build Installers
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            args: --win
+          - os: macos-latest
+            args: --mac
+    runs-on: ${{ matrix.os }}
+    env:
+      # 本机打包产物不需要代码签名(签名需要付费开发者证书),
+      # 显式关闭自动发现证书,避免构建卡在找签名证书上
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build installer
+        run: npx electron-builder ${{ matrix.args }} --publish never
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.os }}
+          path: |
+            dist/*.exe
+            dist/*.dmg
+            dist/*.blockmap
+            dist/*.yml
+          if-no-files-found: error
