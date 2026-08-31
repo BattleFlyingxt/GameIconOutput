@@ -7,9 +7,9 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const zlib = require('zlib');
-const { encodeLosslessPng } = require('./compress');
+const { encodeLosslessPng, encodeProgressivePng } = require('./compress');
 
-// 最小 PNG 解码器(仅支持我们编码出的:bitdepth 8,colortype 2/3/6,interlace 0)
+// 最小 PNG 解码器(仅支持我们编码出的:colortype 2/3/6,bitdepth 1/2/4/8,interlace 0)
 function paeth(a, b, c) {
   const p = a + b - c;
   const pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
@@ -21,7 +21,7 @@ function paeth(a, b, c) {
 function decodePng(buf) {
   const sig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
   for (let i = 0; i < 8; i++) if (buf[i] !== sig[i]) throw new Error('not png');
-  let off = 8, width = 0, height = 0, colorType = 0;
+  let off = 8, width = 0, height = 0, colorType = 0, bitDepth = 8;
   const plte = [];
   let trns = [];
   const idat = [];
@@ -30,7 +30,8 @@ function decodePng(buf) {
     const type = buf.toString('ascii', off, off + 4); off += 4;
     const data = buf.slice(off, off + len); off += len + 4; // +crc
     if (type === 'IHDR') {
-      width = data.readUInt32BE(0); height = data.readUInt32BE(4); colorType = data[9];
+      width = data.readUInt32BE(0); height = data.readUInt32BE(4);
+      bitDepth = data[8]; colorType = data[9];
     } else if (type === 'PLTE') {
       for (let i = 0; i < len; i += 3) plte.push([data[i], data[i + 1], data[i + 2]]);
     } else if (type === 'tRNS') {
@@ -40,8 +41,12 @@ function decodePng(buf) {
     } else if (type === 'IEND') break;
   }
   const inflated = zlib.inflateSync(Buffer.concat(idat));
-  const bpp = colorType === 3 ? 1 : colorType === 2 ? 3 : 4;
-  const stride = width * bpp;
+  // 过滤器的 bpp 按颜色类型定:调色板为 1(位深 <8 时过滤仍按字节进行)
+  const bpp = colorType === 2 ? 3 : colorType === 6 ? 4 : 1;
+  // 调色板位深 <8 时,扫描线按位打包(每字节 8/bitDepth 个像素)
+  const stride = colorType === 3
+    ? Math.ceil((width * bitDepth) / 8)
+    : (colorType === 2 ? width * 3 : width * 4);
   let inOff = 0, prev = null;
   const rgba = Buffer.alloc(width * height * 4);
   for (let y = 0; y < height; y++) {
@@ -63,7 +68,15 @@ function decodePng(buf) {
     for (let x = 0; x < width; x++) {
       const o = (y * width + x) * 4;
       if (colorType === 3) {
-        const idx = row[x], p = plte[idx];
+        let idx;
+        if (bitDepth === 8) idx = row[x];
+        else {
+          const pxPerByte = 8 / bitDepth;
+          const bytePos = (x * bitDepth) >> 3;
+          const shift = 8 - bitDepth - (x % pxPerByte) * bitDepth;
+          idx = (row[bytePos] >> shift) & (bitDepth === 1 ? 1 : bitDepth === 2 ? 3 : 15);
+        }
+        const p = plte[idx];
         rgba[o] = p[0]; rgba[o + 1] = p[1]; rgba[o + 2] = p[2];
         rgba[o + 3] = idx < trns.length ? trns[idx] : 255;
       } else if (colorType === 2) {
@@ -133,6 +146,79 @@ app.whenReady().then(async () => {
       }
       return rgba;
     });
+    assertLosslessRoundTrip('2色位深1路径', 19, 7, () => {
+      const w = 19, h = 7, rgba = Buffer.alloc(w * h * 4);
+      for (let i = 0; i < w * h; i++) {
+        const o = i * 4;
+        if ((i & 1) === 0) { rgba[o] = 0; rgba[o + 1] = 0; rgba[o + 2] = 0; rgba[o + 3] = 255; }
+        else { rgba[o] = 255; rgba[o + 1] = 255; rgba[o + 2] = 255; rgba[o + 3] = 255; }
+      }
+      return rgba;
+    });
+    assertLosslessRoundTrip('8色位深4路径', 17, 5, () => {
+      const w = 17, h = 5, rgba = Buffer.alloc(w * h * 4);
+      for (let i = 0; i < w * h; i++) {
+        const o = i * 4;
+        const c = (i * 29) & 7;
+        rgba[o] = c * 32; rgba[o + 1] = 255 - c * 32; rgba[o + 2] = (c * 16) & 255; rgba[o + 3] = 255;
+      }
+      return rgba;
+    });
+
+    // 渐进式:本就压得进预算的必须保持无损;压不进的必须压到 ≤100KB 且能解码
+    function assertProgressive(label, w, h, makePixels, expectMode) {
+      const rgba = makePixels();
+      const enc = encodeProgressivePng(w, h, rgba);
+      const okSize = enc.buf.length <= 100 * 1024;
+      check(okSize, label + ' 体积 ≤100KB(实际 ' + (enc.buf.length / 1024).toFixed(1) + 'KB)');
+      if (expectMode) check(enc.mode === expectMode, label + ' 保持无损(mode=' + enc.mode + ')');
+      try {
+        const dec = decodePng(enc.buf);
+        check(dec.width === w && dec.height === h, label + ' 解码尺寸正确');
+      } catch (e) {
+        check(false, label + ' 解码失败: ' + (e && e.message));
+      }
+    }
+    // 平滑渐变:无损就能压进 100KB → 必须保持像素零失真
+    assertProgressive('渐变图(应无损)', 512, 512, () => {
+      const w = 512, h = 512, rgba = Buffer.alloc(w * h * 4);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const o = (y * w + x) * 4;
+        rgba[o] = (x * 255 / w) | 0; rgba[o + 1] = (y * 255 / h) | 0;
+        rgba[o + 2] = ((x + y) * 128 / (w + h)) | 0; rgba[o + 3] = 255;
+      }
+      return rgba;
+    }, 'lossless');
+    // 全随机噪声:无损必然超 100KB → 渐进式必须降色压到 ≤100KB 且解码正常
+    assertProgressive('全随机噪声(需降色兜底)', 512, 512, () => {
+      const w = 512, h = 512, rgba = Buffer.alloc(w * h * 4);
+      let s = 0x12345678;
+      for (let i = 0; i < w * h; i++) {
+        const o = i * 4;
+        s = (s * 1664525 + 1013904223) >>> 0;
+        rgba[o] = (s >>> 24) & 0xff;
+        rgba[o + 1] = (s >>> 16) & 0xff;
+        rgba[o + 2] = (s >>> 8) & 0xff;
+        rgba[o + 3] = 255;
+      }
+      return rgba;
+    });
+    // 带透明(圆角)的噪点图:量化兜底不能把透明边缘画脏
+    assertProgressive('带透明噪点图(需降色兜底)', 256, 256, () => {
+      const w = 256, h = 256, rgba = Buffer.alloc(w * h * 4);
+      let s = 0xabcdef01;
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const o = (y * w + x) * 4;
+        const dist = Math.hypot(x - w / 2, y - h / 2);
+        if (dist > w / 2) { rgba[o + 3] = 0; continue; }
+        s = (s * 1664525 + 1013904223) >>> 0;
+        rgba[o] = (s >>> 24) & 0xff;
+        rgba[o + 1] = (s >>> 16) & 0xff;
+        rgba[o + 2] = (s >>> 8) & 0xff;
+        rgba[o + 3] = Math.max(1, Math.min(255, 255 - Math.round((dist - w / 2 + 8) * 255 / 8)));
+      }
+      return rgba;
+    });
 
     // 等窗口与页面加载完成
     await new Promise((r) => setTimeout(r, 1800));
@@ -196,7 +282,8 @@ app.whenReady().then(async () => {
       check(sz.width === size && sz.height === size, file + ' 尺寸 ' + sz.width + 'x' + sz.height);
 
       const byteLen = fs.statSync(p).size;
-      console.log('    ' + file + ' ' + (byteLen / 1024).toFixed(1) + 'KB(无损)');
+      check(byteLen <= 100 * 1024, file + ' ≤100KB(实际 ' + (byteLen / 1024).toFixed(1) + 'KB)');
+      console.log('    ' + file + ' ' + (byteLen / 1024).toFixed(1) + 'KB');
 
       if (type === '圆角') {
         const bmp = img.toBitmap(); // BGRA

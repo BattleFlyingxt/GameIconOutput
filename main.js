@@ -5,7 +5,7 @@ const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const fsp = fs.promises;
-const { encodeLosslessPng } = require('./compress');
+const { encodeProgressivePng } = require('./compress');
 
 const WINDOW_WIDTH = 460;
 const WINDOW_HEIGHT = 780;
@@ -93,8 +93,9 @@ ipcMain.handle('icon-app:save-files', async (event, files) => {
         throw new Error('像素数据无效');
       }
       const rgba = Buffer.from(pixels.buffer, pixels.byteOffset, pixels.byteLength);
-      // 无损 PNG(像素零失真;颜色少自动走调色板,全不透明自动去 alpha)
-      const buf = encodeLosslessPng(width, height, rgba);
+      // 自适应 PNG:先无损,无损超 100KB 才按需降色,保证每张都 ≤ 100KB
+      const enc = encodeProgressivePng(width, height, rgba);
+      const buf = enc.buf;
       const target = uniquePath(dir, name);
       await fsp.writeFile(target, buf);
       // requestedName 是渲染层请求的原始名;name 可能是去重后的实际名(重名会追加 -1)
