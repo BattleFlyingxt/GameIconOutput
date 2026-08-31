@@ -79,7 +79,7 @@ build/icon.png      应用图标
 .github/workflows/build.yml        push 到 main 时双平台自动构建(Artifacts)
 .github/workflows/release.yml      打 v* 标签时出包并发布到 Releases
 .github/workflows/version-bump.yml 手动触发,升级版本号并打标签
-compress.js         调色板量化 + PNG 编码(压缩到 100KB 以下)
+compress.js         无损 PNG 编码(调色板 / RGB / RGBA 自适应)
 verify.js           自动化验证脚本
 ```
 

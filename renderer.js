@@ -207,7 +207,9 @@ async function onExport() {
 
     lastSavedDir = res.dir;
     var savedByName = {};
-    (res.saved || []).forEach(function (s) { savedByName[s.name] = s; });
+    // 主进程返回 requestedName(请求原始名)与 name(去重后实际名);同名文件可能被追加 -1,
+    // 必须按请求名匹配,否则 savedPath 匹配不上,「打开所在目录」按钮会消失
+    (res.saved || []).forEach(function (s) { savedByName[s.requestedName || s.name] = s; });
     items.forEach(function (it) {
       var s = savedByName[it.name];
       it.savedPath = s ? s.path : null;

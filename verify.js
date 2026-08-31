@@ -211,6 +211,22 @@ app.whenReady().then(async () => {
       }
     }
 
+    // 回归:再次导出到同一目录(触发重名去重,落盘变成 xxx-1.png),
+    // 结果卡片必须仍渲染「打开所在目录」按钮(曾因按实际名匹配而消失)
+    const reExport = await win.webContents.executeJavaScript(`(async () => {
+      document.getElementById('exportBtn').click();
+      let statusText = '';
+      for (let i = 0; i < 60; i++) {
+        await new Promise((r) => setTimeout(r, 250));
+        const st = document.getElementById('status');
+        if (st && !st.hidden && /已保存/.test(st.textContent)) { statusText = st.textContent; break; }
+      }
+      const opens = document.querySelectorAll('.result-item .open');
+      return { statusText, openCount: opens.length, sample: opens[0] ? opens[0].textContent : '' };
+    })()`);
+    check(reExport.statusText && /已保存/.test(reExport.statusText), '重复导出同一目录仍提示保存');
+    check(reExport.openCount === 6, '重复导出后每张卡片仍有「打开所在目录」按钮(实际 ' + reExport.openCount + ')');
+
     const total = fs.readdirSync(testDir).reduce((s, f) => s + fs.statSync(path.join(testDir, f)).size, 0);
     console.log('  落盘总字节: ' + total);
   } catch (err) {

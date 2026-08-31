@@ -97,7 +97,8 @@ ipcMain.handle('icon-app:save-files', async (event, files) => {
       const buf = encodeLosslessPng(width, height, rgba);
       const target = uniquePath(dir, name);
       await fsp.writeFile(target, buf);
-      saved.push({ name: path.basename(target), path: target, size: buf.length });
+      // requestedName 是渲染层请求的原始名;name 可能是去重后的实际名(重名会追加 -1)
+      saved.push({ name: path.basename(target), requestedName: name, path: target, size: buf.length });
     } catch (err) {
       errors.push({ name, message: err.message || String(err) });
     }
