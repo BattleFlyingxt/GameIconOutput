@@ -25,14 +25,60 @@ var exportBtn = document.getElementById('exportBtn');
 var statusEl = document.getElementById('status');
 var resultsEl = document.getElementById('results');
 
+var modeSwitch = document.getElementById('modeSwitch');
+var apiKeyRow = document.getElementById('apiKeyRow');
+var apiKeyInput = document.getElementById('apiKey');
+var getKeyBtn = document.getElementById('getKeyBtn');
+var apiKeyHint = document.getElementById('apiKeyHint');
+
 var imageData = null; // 源图 data URL
 var lastSavedDir = null;
+var currentMode = 'online';   // 'online' | 'offline',默认在线
+var apiKey = '';              // TinyPNG API Key(仅存本机)
 
 // 页头显示版本号(vX.Y.Z),与窗口标题一致
 if (window.iconApp && window.iconApp.version) {
   window.iconApp.version().then(function (v) {
     var el = document.getElementById('appVersion');
     if (el && v) el.textContent = 'v' + v;
+  }).catch(function () {});
+}
+
+// ------------------------------------------------------------ 压缩模式(在线/离线)+ 配置
+// 默认在线压缩;离线压缩是本地 TinyPNG 式量化。模式与 API key 保存在本机配置里。
+
+function setMode(mode) {
+  currentMode = mode === 'offline' ? 'offline' : 'online';
+  Array.prototype.forEach.call(modeSwitch.querySelectorAll('.mode-btn'), function (b) {
+    b.classList.toggle('active', b.dataset.mode === currentMode);
+  });
+  apiKeyRow.hidden = currentMode !== 'online';
+  apiKeyHint.hidden = currentMode !== 'online';
+  if (window.iconApp.setConfig) window.iconApp.setConfig({ mode: currentMode });
+}
+
+Array.prototype.forEach.call(modeSwitch.querySelectorAll('.mode-btn'), function (btn) {
+  btn.addEventListener('click', function () { setMode(btn.dataset.mode); });
+});
+
+getKeyBtn.addEventListener('click', function () {
+  if (window.iconApp.openExternal) window.iconApp.openExternal('https://tinypng.com/developers');
+});
+
+apiKeyInput.addEventListener('change', function () {
+  apiKey = apiKeyInput.value.trim();
+  if (window.iconApp.setConfig) window.iconApp.setConfig({ apiKey: apiKey });
+});
+
+// 启动时恢复上次的模式 / API key
+if (window.iconApp.getConfig) {
+  window.iconApp.getConfig().then(function (cfg) {
+    if (!cfg) return;
+    if (cfg.mode) setMode(cfg.mode);
+    if (cfg.apiKey) {
+      apiKey = cfg.apiKey;
+      apiKeyInput.value = cfg.apiKey;
+    }
   }).catch(function () {});
 }
 
@@ -178,8 +224,16 @@ async function onExport() {
   var variants = normalizeVariants(collectVariants());
   if (!variants.length) return setStatus('请至少勾选一个导出规格');
 
+    // 在线压缩必须填 API key;没有就给出明确引导,而不是静默失败
+  if (currentMode === 'online' && !apiKey) {
+    apiKeyRow.hidden = false;
+    apiKeyHint.hidden = false;
+    apiKeyInput.focus();
+    return setStatus('在线压缩需要 TinyPNG API Key —— 点「获取免费 Key」申请(每月 500 张免费)填到上方;或切换到离线压缩。');
+  }
+
   exportBtn.disabled = true;
-  setStatus('正在导出…', false);
+  setStatus(currentMode === 'online' ? '正在上传 tinypng.com 压缩…' : '正在导出…', false);
   try {
     var img = await loadImage(imageData);
     var items = [];
@@ -187,7 +241,7 @@ async function onExport() {
       var v = variants[i];
       var canvas = v.type === '圆角' ? renderRound(img, v.size) : renderStraight(img, v.size);
       var ctx = canvas.getContext('2d');
-      // 原始 RGBA 交给主进程做 TinyPNG 式压缩;预览用 PNG
+      // 原始 RGBA 交给主进程:在线=先无损编码再上传 tinypng,离线=TinyPNG 式本地量化;预览用 PNG
       var imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       items.push({
         name: gameName + '-' + v.size + ' ' + v.type + '.png',
@@ -203,7 +257,7 @@ async function onExport() {
 
     var res = await window.iconApp.saveFiles(items.map(function (it) {
       return { name: it.name, width: it.width, height: it.height, pixels: it.pixels };
-    }));
+    }), { mode: currentMode, apiKey: apiKey });
 
     if (!res) throw new Error('无法调用保存功能,应用可能已损坏。');
     if (res.cancelled) {

@@ -108,6 +108,8 @@ const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'eic-test-'));
 
 // 让真实应用(main.js)的保存对话框直接指向测试目录
 dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [testDir] });
+// 隔离配置写入(目录记忆 / API key / 模式),避免污染真实 userData
+app.setPath('userData', testDir);
 
 require('./main.js'); // 启动真实应用
 
@@ -279,6 +281,8 @@ app.whenReady().then(async () => {
 
       window.imageData = c.toDataURL('image/png');
       document.getElementById('gameName').value = '测试游戏';
+      // 自动化只测离线压缩(在线依赖网络 + 真实 API key)
+      document.querySelector('#modeSwitch .mode-btn[data-mode="offline"]').click();
       document.getElementById('exportBtn').click();
 
       // 轮询直到导出完成(status 出现「已保存」)
@@ -333,6 +337,7 @@ app.whenReady().then(async () => {
     // 回归:再次导出到同一目录(触发重名去重,落盘变成 xxx-1.png),
     // 结果卡片必须仍渲染「打开所在目录」按钮(曾因按实际名匹配而消失)
     const reExport = await win.webContents.executeJavaScript(`(async () => {
+      document.querySelector('#modeSwitch .mode-btn[data-mode="offline"]').click();
       document.getElementById('exportBtn').click();
       let statusText = '';
       for (let i = 0; i < 60; i++) {
@@ -345,6 +350,21 @@ app.whenReady().then(async () => {
     })()`);
     check(reExport.statusText && /已保存/.test(reExport.statusText), '重复导出同一目录仍提示保存');
     check(reExport.openCount === 6, '重复导出后每张卡片仍有「打开所在目录」按钮(实际 ' + reExport.openCount + ')');
+
+    // 在线模式无 key 守卫:默认在线 + 无 key 时导出应给出明确引导、聚焦输入框,不弹对话框
+    const onlineGuard = await win.webContents.executeJavaScript(`(async () => {
+      document.querySelector('#modeSwitch .mode-btn[data-mode="online"]').click();
+      apiKeyInput.value = ''; apiKey = '';
+      document.getElementById('gameName').value = '测试游戏';
+      document.getElementById('exportBtn').click();
+      await new Promise((r) => setTimeout(r, 200));
+      const st = document.getElementById('status');
+      const focused = document.activeElement === document.getElementById('apiKey');
+      return { text: st && st.textContent, focused };
+    })()`);
+    check(onlineGuard.text && /API Key/.test(onlineGuard.text),
+      '在线无 key 导出给出明确引导: ' + (onlineGuard.text || '(无)'));
+    check(onlineGuard.focused, '无 key 时聚焦到 API key 输入框');
 
     const total = fs.readdirSync(testDir).reduce((s, f) => s + fs.statSync(path.join(testDir, f)).size, 0);
     console.log('  落盘总字节: ' + total);

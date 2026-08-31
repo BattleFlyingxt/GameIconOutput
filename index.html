@@ -14,6 +14,16 @@
       <p class="app-sub">把游戏 ICON 批量导出成直角 / 圆角规格的 PNG,按游戏名命名</p>
     </header>
 
+    <div class="mode-switch" id="modeSwitch">
+      <button type="button" class="mode-btn active" data-mode="online">在线压缩</button>
+      <button type="button" class="mode-btn" data-mode="offline">离线压缩</button>
+    </div>
+    <div id="apiKeyRow" class="api-key-row">
+      <input id="apiKey" type="password" placeholder="TinyPNG API Key(免费申请)" autocomplete="off" spellcheck="false">
+      <button type="button" id="getKeyBtn" class="get-key-btn">获取免费 Key</button>
+    </div>
+    <div id="apiKeyHint" class="hint">在线压缩走 tinypng.com 官方 API,每月 500 张免费;Key 仅保存在本机,可到「获取免费 Key」申请。</div>
+
     <div id="dropzone" class="dropzone">
       <input type="file" id="fileInput" accept="image/*" hidden>
       <img id="preview" alt="" hidden>
