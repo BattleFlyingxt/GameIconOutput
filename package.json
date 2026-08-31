@@ -1,6 +1,6 @@
 {
   "name": "game-icon-export-app",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "游戏图标导出工具 - 把游戏 ICON 批量导出成直角/圆角规格的 PNG,按游戏名命名",
   "main": "main.js",
   "author": "Cindy User",
