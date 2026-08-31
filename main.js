@@ -6,7 +6,9 @@ const path = require('path');
 const fs = require('fs');
 const fsp = fs.promises;
 const { encodeProgressivePng } = require('./compress');
+const pkg = require('./package.json');
 
+const APP_TITLE = '游戏图标导出 v' + pkg.version;
 const WINDOW_WIDTH = 460;
 const WINDOW_HEIGHT = 780;
 
@@ -18,7 +20,7 @@ function createWindow() {
     height: WINDOW_HEIGHT,
     minWidth: 380,
     minHeight: 600,
-    title: '游戏图标导出',
+    title: APP_TITLE,
     autoHideMenuBar: true,
     backgroundColor: '#1e1e1e',
     webPreferences: {
@@ -30,6 +32,8 @@ function createWindow() {
   });
 
   mainWindow.loadFile('index.html');
+  // 页面里的 <title> 加载后会覆盖窗口标题,拦掉,始终显示带版本号的标题
+  mainWindow.on('page-title-updated', (e) => e.preventDefault());
   mainWindow.on('closed', () => { mainWindow = null; });
 }
 
@@ -93,7 +97,7 @@ ipcMain.handle('icon-app:save-files', async (event, files) => {
         throw new Error('像素数据无效');
       }
       const rgba = Buffer.from(pixels.buffer, pixels.byteOffset, pixels.byteLength);
-      // 自适应 PNG:先无损,无损超 100KB 才按需降色,保证每张都 ≤ 100KB
+      // TinyPNG 式 PNG:≤256 色无损调色板,>256 色感知量化,保证每张都 ≤ 100KB
       const enc = encodeProgressivePng(width, height, rgba);
       const buf = enc.buf;
       const target = uniquePath(dir, name);
@@ -112,3 +116,6 @@ ipcMain.handle('icon-app:save-files', async (event, files) => {
 ipcMain.handle('icon-app:show-in-folder', (event, filePath) => {
   if (filePath) shell.showItemInFolder(filePath);
 });
+
+// 应用版本号(标题与页头显示)
+ipcMain.handle('icon-app:version', () => pkg.version);

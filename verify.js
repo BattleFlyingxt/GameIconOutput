@@ -165,13 +165,28 @@ app.whenReady().then(async () => {
       return rgba;
     });
 
-    // 渐进式:本就压得进预算的必须保持无损;压不进的必须压到 ≤100KB 且能解码
-    function assertProgressive(label, w, h, makePixels, expectMode) {
+    // 渐进式:≤256 色的必须保持无损;>256 色的走 TinyPNG 式量化压到 ≤100KB
+    // 且量化痕迹(与原图逐像素平均色差)必须小,否则就是肉眼可见的压缩痕迹
+    function assertProgressive(label, w, h, makePixels, expectMode, maxAvgErr) {
       const rgba = makePixels();
       const enc = encodeProgressivePng(w, h, rgba);
       const okSize = enc.buf.length <= 100 * 1024;
       check(okSize, label + ' 体积 ≤100KB(实际 ' + (enc.buf.length / 1024).toFixed(1) + 'KB)');
-      if (expectMode) check(enc.mode === expectMode, label + ' 保持无损(mode=' + enc.mode + ')');
+      if (expectMode) check(enc.mode === expectMode, label + ' mode=' + enc.mode + '(期望 ' + expectMode + ')');
+      if (enc.mode === 'quantized') {
+        check(enc.colors <= 256, label + ' 量化色数 ≤256(实际 ' + enc.colors + ')');
+      }
+      if (maxAvgErr) {
+        const dec = decodePng(enc.buf);
+        let sum = 0, n = 0;
+        for (let i = 0; i < rgba.length; i += 4) {
+          if (rgba[i + 3] === 0) continue; // 只看可见像素
+          sum += Math.abs(dec.rgba[i] - rgba[i]) + Math.abs(dec.rgba[i + 1] - rgba[i + 1]) + Math.abs(dec.rgba[i + 2] - rgba[i + 2]);
+          n++;
+        }
+        const avgErr = n ? sum / (n * 3) : 0;
+        check(avgErr <= maxAvgErr, label + ' 量化痕迹小(平均色差 ' + avgErr.toFixed(2) + ' ≤' + maxAvgErr + ')');
+      }
       try {
         const dec = decodePng(enc.buf);
         check(dec.width === w && dec.height === h, label + ' 解码尺寸正确');
@@ -179,8 +194,8 @@ app.whenReady().then(async () => {
         check(false, label + ' 解码失败: ' + (e && e.message));
       }
     }
-    // 平滑渐变:无损就能压进 100KB → 必须保持像素零失真
-    assertProgressive('渐变图(应无损)', 512, 512, () => {
+    // 平滑渐变(>256 色):现在一律走 TinyPNG 式量化,但必须色差小到几乎不可见
+    assertProgressive('渐变图(TinyPNG式量化)', 512, 512, () => {
       const w = 512, h = 512, rgba = Buffer.alloc(w * h * 4);
       for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
         const o = (y * w + x) * 4;
@@ -188,7 +203,7 @@ app.whenReady().then(async () => {
         rgba[o + 2] = ((x + y) * 128 / (w + h)) | 0; rgba[o + 3] = 255;
       }
       return rgba;
-    }, 'lossless');
+    }, 'quantized', 8);
     // 全随机噪声:无损必然超 100KB → 渐进式必须降色压到 ≤100KB 且解码正常
     assertProgressive('全随机噪声(需降色兜底)', 512, 512, () => {
       const w = 512, h = 512, rgba = Buffer.alloc(w * h * 4);

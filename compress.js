@@ -270,7 +270,6 @@ function quantizeToPalette(rgba, width, height, K, dither) {
     al[i] = rgba[o + 3];
   }
   const hasTransparent = vis.length !== count;
-  const transparentIdx = palette.length; // 透明入口追加在最后
 
   if (vis.length === 0) {
     palette.push(transparent);
@@ -370,6 +369,7 @@ function quantizeToPalette(rgba, width, height, K, dither) {
       Math.max(0, Math.min(255, Math.round(ea[j])))]);
   }
   const pl0 = palette.length;
+  const transparentIdx = pl0; // 透明入口追加在 pl0(所有不透明入口之后)
   if (hasTransparent) palette.push(transparent);
 
   // 调色板入口的感知空间表示
@@ -440,18 +440,39 @@ function compactPalette(palette, indices, count, opaqueCount) {
 }
 
 // ------------------------------------------------------ 渐进式编码(对外主入口)
-// 先无损;无损超出预算才按需降色,从 256 色逐级往下压到 ≤ 预算即停。
-// 每档先试「抖动」再试「不抖动」:同色数下抖动视觉更好,若体积超预算则退回不抖动。
-// 返回 { buf, mode: 'lossless' | 'quantized', colors? , dither? }
+// TinyPNG / pngquant 式:一律走调色板量化输出,不做 RGB/RGBA 真彩。
+//   · 不同颜色数 ≤256:调色板即像素无损(与 TinyPNG 对低色图的处理一致),最小体积;
+//   · 不同颜色数 >256:感知量化到 ≤256 色,从 256 色逐级往下压到 ≤ 预算即停。
+// 每档先试「抖动」再试「不抖动」:同色数下抖动视觉最好,若体积超预算再退回不抖动。
+// 返回 { buf, mode: 'lossless' | 'quantized', colors?, dither? }
 const DEFAULT_MAX_BYTES = 100 * 1024;
 
+// 统计不同颜色数(用于判断能否直接无损调色板)
+function countDistinctColors(rgba, count) {
+  const seen = new Set();
+  for (let i = 0; i < count; i++) {
+    const o = i * 4;
+    seen.add((rgba[o] << 24) | (rgba[o + 1] << 16) | (rgba[o + 2] << 8) | rgba[o + 3]);
+    if (seen.size > 256) return 257; // 已确认超 256,提前结束
+  }
+  return seen.size;
+}
+
 function encodeProgressivePng(width, height, rgba, maxBytes = DEFAULT_MAX_BYTES) {
-  const lossless = encodeLosslessPng(width, height, rgba);
-  if (lossless.length <= maxBytes) return { buf: lossless, mode: 'lossless' };
+  const count = width * height;
+  const distinct = countDistinctColors(rgba, count);
+
+  // ≤256 色:精确调色板即无损且最小(和 TinyPNG 对低色图的处理一致)
+  if (distinct <= 256) {
+    const exact = encodeLosslessPng(width, height, rgba);
+    if (exact.length <= maxBytes) return { buf: exact, mode: 'lossless', colors: distinct };
+    // 极少数情况:色数≤256 但噪声太大仍超预算 → 继续降色兜底
+  }
 
   // 降色阶梯:多给几个中间档,尽量用「恰好够用」的颜色数,画质损失最小
   const K_LIST = [256, 224, 192, 160, 128, 96, 80, 64, 48, 32, 24, 16, 12, 8, 4, 2];
   for (const K of K_LIST) {
+    if (distinct <= 256 && K >= distinct) continue; // 精确调色板已试过,不再试 ≥distinct 的量化
     const q1 = quantizeToPalette(rgba, width, height, K, true);
     const png1 = encodePalettePng(width, height, q1.palette, q1.indices);
     if (png1.length <= maxBytes) return { buf: png1, mode: 'quantized', colors: q1.palette.length, dither: true };

@@ -28,6 +28,14 @@ var resultsEl = document.getElementById('results');
 var imageData = null; // 源图 data URL
 var lastSavedDir = null;
 
+// 页头显示版本号(vX.Y.Z),与窗口标题一致
+if (window.iconApp && window.iconApp.version) {
+  window.iconApp.version().then(function (v) {
+    var el = document.getElementById('appVersion');
+    if (el && v) el.textContent = 'v' + v;
+  }).catch(function () {});
+}
+
 // ------------------------------------------------------------ 拖放(整窗可拖)
 
 function isFileDrag(e) {
@@ -179,7 +187,7 @@ async function onExport() {
       var v = variants[i];
       var canvas = v.type === '圆角' ? renderRound(img, v.size) : renderStraight(img, v.size);
       var ctx = canvas.getContext('2d');
-      // 原始 RGBA 交给主进程做调色板量化压缩;预览用 PNG
+      // 原始 RGBA 交给主进程做 TinyPNG 式压缩;预览用 PNG
       var imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       items.push({
         name: gameName + '-' + v.size + ' ' + v.type + '.png',
