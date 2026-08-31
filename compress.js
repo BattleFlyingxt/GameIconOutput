@@ -5,9 +5,12 @@
 //   encodeProgressivePng —— 渐进式:先试无损;无损超上限才按需降色,
 //                       从 256 色逐级往下压到体积达标,把画质损失压到最小。
 //   降色路径集成 pngquant / TinyPNG 同款思路:
-//     · 感知空间(γ≈2.2 校正) + 亮度加权距离 2dr²+4dg²+3db²+4da² —— 人眼更准的最近色;
+//     · 感知空间(浮点 γ≈2.2 校正,不走 8 位查找表) + 亮度加权距离 2dr²+4dg²+3db²+4da²
+//        —— 人眼更准的最近色,且避免「线性→γ→线性」双取整的暗部 +1 色偏;
 //     · K-means 调色板精修(中位切分初始化后在可见像素样本上迭代),比盒均值准得多;
-//     · Floyd–Steinberg 抖动只扩散 RGB,alpha 不抖 —— 渐变不色带,圆角边缘不画脏;
+//     · 选择性抖动:重要度图(每像素到最近调色板色的感知距离,模糊归一化)抑制纯色区噪点,
+//       + 蛇形扫描 + 误差钳制 + 噪声阈值 —— 调色板够好的地方不撒噪点,渐变处防色带;
+//     · 误差只扩散 RGB,alpha 不抖 —— 半透明/圆角边缘不被画脏;
 //     · 调色板瘦身:去掉未用入口 → PLTE 更小、位深可更低;
 //     · deflate 多策略择优(Z_FILTERED / Z_RLE / Z_HUFFMAN_ONLY 取最小)。
 'use strict';
@@ -235,12 +238,10 @@ function encodeLosslessPng(width, height, rgba) {
 // ---------------------------------------------------------- 感知色彩空间
 // pngquant 核心思想:量化在感知空间做,而非线性 RGB。
 // γ≈2.2 的幂曲线近似 sRGB 感知亮度,距离公式对 R/G/B 通道加人眼敏感度权重。
-const GAMMA_TABLE = new Uint8Array(256);
-const UNGAMMA_TABLE = new Uint8Array(256);
-for (let i = 0; i < 256; i++) {
-  GAMMA_TABLE[i] = Math.round(Math.pow(i / 255, 2.2) * 255);
-  UNGAMMA_TABLE[i] = Math.round(Math.pow(i / 255, 1 / 2.2) * 255);
-}
+// 用浮点而非 8 位查找表:避免「线性→γ→线性」两次取整带来的暗部 +1 色偏。
+const GAMMA = 2.2;
+function gammaF(v) { return 255 * Math.pow(v / 255, GAMMA); }                                                            // 线性 → 感知
+function ungammaF(v) { return 255 * Math.pow(Math.max(0, Math.min(255, v)) / 255, 1 / GAMMA); }                          // 感知 → 线性
 
 // 感知距离:2·dr² + 4·dg² + 3·db² + 4·da²
 // (green 敏感度最高;alpha 也参与,平衡透明混合边缘的取舍)
@@ -249,24 +250,144 @@ function pxDist(r, g, b, a, er, eg, eb, ea) {
   return 2 * dr * dr + 4 * dg * dg + 3 * db * db + 4 * da * da;
 }
 
+// ---------------------------------------------------------- 重要度图(选择性抖动)
+// 全量 Floyd–Steinberg 会在「调色板本就覆盖得好」的纯色区撒出可见噪点 —— 真实照片的
+// 天空/皮肤等大色块尤其明显。pngquant 思路:先算每像素到最近调色板色的感知距离,
+// 模糊后归一化成 0..1 的重要度 —— 调色板够好的地方重要度≈0,抖动误差被压到近乎 0
+// (纯色区干净);渐变/纹理覆盖不足的地方重要度≈1,正常抖动防色带。
+// 在 1/4 分辨率网格上计算 + 盒式模糊 + 双线性放大,精度损失可忽略、快约 4 倍。
+function buildImportanceMap(fr, fg, fb, al, per, peg, peb, pl, width, height) {
+  const w2 = Math.ceil(width / 2), h2 = Math.ceil(height / 2);
+  const dist = new Float32Array(w2 * h2);
+  for (let yy = 0; yy < h2; yy++) {
+    const y = Math.min(height - 1, yy * 2);
+    const yb = y * width;
+    for (let xx = 0; xx < w2; xx++) {
+      const x = Math.min(width - 1, xx * 2);
+      const i = yb + x;
+      if (al[i] === 0) continue;
+      const r = fr[i], g = fg[i], b = fb[i];
+      let best = Infinity;
+      for (let j = 0; j < pl; j++) {
+        const dr = r - per[j], dg = g - peg[j], db = b - peb[j];
+        const d = 2 * dr * dr + 4 * dg * dg + 3 * db * db;
+        if (d < best) best = d;
+      }
+      dist[yy * w2 + xx] = Math.sqrt(best);
+    }
+  }
+  const blur = new Float32Array(w2 * h2);
+  for (let yy = 0; yy < h2; yy++) {
+    const y0 = Math.max(0, yy - 1), y1 = Math.min(h2 - 1, yy + 1);
+    for (let xx = 0; xx < w2; xx++) {
+      const x0 = Math.max(0, xx - 1), x1 = Math.min(w2 - 1, xx + 1);
+      let sum = 0, nn = 0;
+      for (let sy = y0; sy <= y1; sy++) {
+        const rb = sy * w2;
+        for (let sx = x0; sx <= x1; sx++) { sum += dist[rb + sx]; nn++; }
+      }
+      blur[yy * w2 + xx] = sum / nn;
+    }
+  }
+  const imp = new Float32Array(width * height);
+  for (let y = 0; y < height; y++) {
+    const gy = Math.max(0, Math.min(h2 - 1, y / 2 - 0.25));
+    const y0 = Math.floor(gy), y1 = Math.min(h2 - 1, y0 + 1);
+    const ty = gy - y0;
+    const row0 = y0 * w2, row1 = y1 * w2;
+    for (let x = 0; x < width; x++) {
+      const gx = Math.max(0, Math.min(w2 - 1, x / 2 - 0.25));
+      const x0 = Math.floor(gx), x1 = Math.min(w2 - 1, x0 + 1);
+      const tx = gx - x0;
+      const v = blur[row0 + x0] * (1 - tx) * (1 - ty) + blur[row0 + x1] * tx * (1 - ty)
+              + blur[row1 + x0] * (1 - tx) * ty + blur[row1 + x1] * tx * ty;
+      const s = v / 12; // 感知距离 12(≈每通道差 4/255)以上视为需要全抖
+      imp[y * width + x] = s > 1 ? 1 : s;
+    }
+  }
+  return imp;
+}
+
+// 选择性抖动(pngquant remap 思路):
+//   · 蛇形扫描:奇数行从右往左、FS 系数镜像 → 误差双向分布,无单向条纹;
+//   · 重要度缩放:进像素的累计误差先 ×重要度 → 纯色区误差≈0,不撒噪点;
+//   · 误差钳制:累计误差平方超上限 → 整体 ×0.75 衰减,防误差失控拖出黑/白条纹;
+//   · 噪声阈值:累计误差低于人眼无感 → 直接取最近色、不扩散(误差消散,文件更小);
+//   · 只扩散 RGB,alpha 不抖 → 半透明/圆角边缘不被画脏。
+const DITHER_ERR_LIMIT = 3 * 64 * 64; // 累计误差平方上限(单通道约 64/255),超限 ×0.75
+const DITHER_NOISE_LIMIT = 2;          // pngquant 阈值换算到 0-255:2·255²/256² ≈ 1.98
+
+function ditherSelective(fr, fg, fb, al, per, peg, peb, pea, pl, transparentIdx, width, height, indices, imp) {
+  const w1 = width + 2;
+  let errR = new Float32Array(w1), errG = new Float32Array(w1), errB = new Float32Array(w1);
+  let nxtR = new Float32Array(w1), nxtG = new Float32Array(w1), nxtB = new Float32Array(w1);
+  const FS = 1 / 16;
+  for (let y = 0; y < height; y++) {
+    nxtR.fill(0); nxtG.fill(0); nxtB.fill(0);
+    const forward = (y & 1) === 0;
+    for (let k = 0; k < width; k++) {
+      const x = forward ? k : width - 1 - k;
+      const i = y * width + x;
+      if (al[i] === 0) { indices[i] = transparentIdx; continue; }
+      let er = errR[x + 1], eg = errG[x + 1], eb = errB[x + 1];
+      let mag2 = er * er + eg * eg + eb * eb;
+      if (mag2 > DITHER_ERR_LIMIT) { er *= 0.75; eg *= 0.75; eb *= 0.75; }
+      const a = al[i];
+      if (mag2 < DITHER_NOISE_LIMIT) {
+        // 累计误差人眼无感:取最近色、不扩散,误差在此消散
+        let best = 0, bestD = Infinity;
+        for (let j = 0; j < pl; j++) {
+          const d = pxDist(fr[i], fg[i], fb[i], a, per[j], peg[j], peb[j], pea[j]);
+          if (d < bestD) { bestD = d; best = j; }
+        }
+        indices[i] = best;
+        continue;
+      }
+      const sc = imp[i];
+      const sr = fr[i] + er * sc, sg = fg[i] + eg * sc, sb = fb[i] + eb * sc;
+      let best = 0, bestD = Infinity;
+      for (let j = 0; j < pl; j++) {
+        const d = pxDist(sr, sg, sb, a, per[j], peg[j], peb[j], pea[j]);
+        if (d < bestD) { bestD = d; best = j; }
+      }
+      indices[i] = best;
+      const rerr = sr - per[best], gerr = sg - peg[best], berr = sb - peb[best];
+      if (forward) {
+        errR[x + 2] += rerr * 7 * FS; errG[x + 2] += gerr * 7 * FS; errB[x + 2] += berr * 7 * FS;
+        nxtR[x] += rerr * FS; nxtG[x] += gerr * FS; nxtB[x] += berr * FS;
+        nxtR[x + 1] += rerr * 5 * FS; nxtG[x + 1] += gerr * 5 * FS; nxtB[x + 1] += berr * 5 * FS;
+        nxtR[x + 2] += rerr * 3 * FS; nxtG[x + 2] += gerr * 3 * FS; nxtB[x + 2] += berr * 3 * FS;
+      } else {
+        errR[x] += rerr * 7 * FS; errG[x] += gerr * 7 * FS; errB[x] += berr * 7 * FS;
+        nxtR[x] += rerr * FS; nxtG[x] += gerr * FS; nxtB[x] += berr * FS;
+        nxtR[x + 1] += rerr * 5 * FS; nxtG[x + 1] += gerr * 5 * FS; nxtB[x + 1] += berr * 5 * FS;
+        nxtR[x + 2] += rerr * 3 * FS; nxtG[x + 2] += gerr * 3 * FS; nxtB[x + 2] += berr * 3 * FS;
+      }
+    }
+    let t = errR; errR = nxtR; nxtR = t;
+    t = errG; errG = nxtG; nxtG = t;
+    t = errB; errB = nxtB; nxtB = t;
+  }
+}
+
 // ---------------------------------------------------------- 调色板量化(兜底)
 // 全透明像素(a=0)统一归并为一个透明入口,不占颜色预算,透明边缘不被画脏。
 // 可见像素调色板 = 中位切分初始化(K-means 每轮)在感知空间对样本迭代精修。
-// 映射:最近邻(感知距离);dither=true 时做 Floyd–Steinberg 误差扩散(仅 RGB)。
+// 映射:最近邻(感知距离);dither=true 时做重要度引导的选择性 FS 误差扩散(仅 RGB)。
 function quantizeToPalette(rgba, width, height, K, dither) {
   const count = width * height;
   const transparent = [0, 0, 0, 0];
   const indices = new Uint8Array(count);
   const palette = [];
 
-  // 可见像素索引(光栅顺序) + 全幅感知空间工作区
+  // 可见像素索引(光栅顺序) + 全幅感知空间工作区(浮点 γ)
   const vis = [];
   const fr = new Float32Array(count), fg = new Float32Array(count), fb = new Float32Array(count);
   const al = new Uint8Array(count);
   for (let i = 0; i < count; i++) {
     const o = i * 4;
     if (rgba[o + 3] !== 0) vis.push(i);
-    fr[i] = GAMMA_TABLE[rgba[o]]; fg[i] = GAMMA_TABLE[rgba[o + 1]]; fb[i] = GAMMA_TABLE[rgba[o + 2]];
+    fr[i] = gammaF(rgba[o]); fg[i] = gammaF(rgba[o + 1]); fb[i] = gammaF(rgba[o + 2]);
     al[i] = rgba[o + 3];
   }
   const hasTransparent = vis.length !== count;
@@ -361,24 +482,20 @@ function quantizeToPalette(rgba, width, height, K, dither) {
     if (moved === 0) break;
   }
 
-  // 精修结果转回 8 位线性 RGB 入口 + 追加透明入口
+  // 精修结果转回 8 位线性 RGB 入口(浮点 ungamma,避免 8 位表双取整偏移)+ 追加透明入口
   for (let j = 0; j < Kc; j++) {
-    palette.push([UNGAMMA_TABLE[Math.max(0, Math.min(255, Math.round(egr[j])))],
-      UNGAMMA_TABLE[Math.max(0, Math.min(255, Math.round(egg[j])))],
-      UNGAMMA_TABLE[Math.max(0, Math.min(255, Math.round(egb[j])))],
+    palette.push([Math.round(ungammaF(egr[j])), Math.round(ungammaF(egg[j])), Math.round(ungammaF(egb[j])),
       Math.max(0, Math.min(255, Math.round(ea[j])))]);
   }
   const pl0 = palette.length;
   const transparentIdx = pl0; // 透明入口追加在 pl0(所有不透明入口之后)
   if (hasTransparent) palette.push(transparent);
 
-  // 调色板入口的感知空间表示
+  // 映射用的感知空间入口 = k-means 浮点中心(不再经 8 位 γ 表往返,调色板更精确)
   const pl = palette.length;
   const per = new Float32Array(pl), peg = new Float32Array(pl), peb = new Float32Array(pl), pea = new Float32Array(pl);
-  for (let j = 0; j < pl; j++) {
-    per[j] = GAMMA_TABLE[palette[j][0]]; peg[j] = GAMMA_TABLE[palette[j][1]];
-    peb[j] = GAMMA_TABLE[palette[j][2]]; pea[j] = palette[j][3];
-  }
+  for (let j = 0; j < pl0; j++) { per[j] = egr[j]; peg[j] = egg[j]; peb[j] = egb[j]; pea[j] = ea[j]; }
+  if (hasTransparent) { per[pl0] = 0; peg[pl0] = 0; peb[pl0] = 0; pea[pl0] = 0; }
 
   // 透明像素先钉死
   if (hasTransparent) {
@@ -386,28 +503,8 @@ function quantizeToPalette(rgba, width, height, K, dither) {
   }
 
   if (dither) {
-    // Floyd–Steinberg:误差只扩散 RGB(alpha 不抖,保证半透明/圆角边缘不被破坏)
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const i = y * width + x;
-        if (al[i] === 0) continue;
-        let best = 0, bestD = Infinity;
-        for (let j = 0; j < pl; j++) {
-          const d = pxDist(fr[i], fg[i], fb[i], al[i], per[j], peg[j], peb[j], pea[j]);
-          if (d < bestD) { bestD = d; best = j; }
-        }
-        indices[i] = best;
-        const er = fr[i] - per[best], eg = fg[i] - peg[best], eb = fb[i] - peb[best];
-        if (er !== 0 || eg !== 0 || eb !== 0) {
-          if (x + 1 < width) { const j = i + 1; fr[j] += er * 0.4375; fg[j] += eg * 0.4375; fb[j] += eb * 0.4375; }
-          if (y + 1 < height) {
-            if (x > 0) { const j = i + width - 1; fr[j] += er * 0.1875; fg[j] += eg * 0.1875; fb[j] += eb * 0.1875; }
-            { const j = i + width; fr[j] += er * 0.3125; fg[j] += eg * 0.3125; fb[j] += eb * 0.3125; }
-            if (x + 1 < width) { const j = i + width + 1; fr[j] += er * 0.0625; fg[j] += eg * 0.0625; fb[j] += eb * 0.0625; }
-          }
-        }
-      }
-    }
+    const imp = buildImportanceMap(fr, fg, fb, al, per, peg, peb, pl, width, height);
+    ditherSelective(fr, fg, fb, al, per, peg, peb, pea, pl, transparentIdx, width, height, indices, imp);
   } else {
     for (let k = 0; k < n; k++) {
       const i = vis[k];
@@ -485,4 +582,4 @@ function encodeProgressivePng(width, height, rgba, maxBytes = DEFAULT_MAX_BYTES)
   return { buf: encodePalettePng(width, height, q.palette, q.indices), mode: 'quantized', colors: q.palette.length, dither: false };
 }
 
-module.exports = { encodeLosslessPng, encodeProgressivePng };
+module.exports = { encodeLosslessPng, encodeProgressivePng, encodePalettePng, quantizeToPalette };
