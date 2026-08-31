@@ -219,6 +219,23 @@ app.whenReady().then(async () => {
       }
       return rgba;
     });
+    // 渐变 + 局部噪点:无损超预算 → 应走抖动量化;抖动输出必须可解码,体积不超
+    assertProgressive('渐变+噪点图(应触发抖动量化)', 384, 384, () => {
+      const w = 384, h = 384, rgba = Buffer.alloc(w * h * 4);
+      let s = 0x0f1e2d3c;
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const o = (y * w + x) * 4;
+        const cx = x - w / 2, cy = y - h / 2;
+        if (Math.hypot(cx, cy) > w / 2) { rgba[o + 3] = 0; continue; }
+        s = (s * 1664525 + 1013904223) >>> 0;
+        const n = (s >>> 24) & 0xff;
+        rgba[o] = (x * 220 / w + n * 0.18) & 0xff;
+        rgba[o + 1] = (y * 220 / h + n * 0.18) & 0xff;
+        rgba[o + 2] = (((x + y) * 128 / (w + h)) + n * 0.18) & 0xff;
+        rgba[o + 3] = 255;
+      }
+      return rgba;
+    });
 
     // 等窗口与页面加载完成
     await new Promise((r) => setTimeout(r, 1800));
