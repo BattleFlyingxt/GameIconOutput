@@ -68,11 +68,13 @@ jobs:
           path: release/macos
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v2.6.2
         with:
           name: 游戏图标导出 ${{ github.ref_name }}
           tag_name: ${{ github.ref }}
           files: |
             release/windows/**
             release/macos/**
+          # 并行上传 asset 时有竞态会导致 update-a-release-asset 404,串行上传规避
+          preserve_order: true
           generate_release_notes: true
