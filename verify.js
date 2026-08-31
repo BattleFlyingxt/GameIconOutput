@@ -6,6 +6,90 @@ const { app, dialog, BrowserWindow, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const zlib = require('zlib');
+const { encodeLosslessPng } = require('./compress');
+
+// 最小 PNG 解码器(仅支持我们编码出的:bitdepth 8,colortype 2/3/6,interlace 0)
+function paeth(a, b, c) {
+  const p = a + b - c;
+  const pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+  if (pa <= pb && pa <= pc) return a;
+  if (pb <= pc) return b;
+  return c;
+}
+
+function decodePng(buf) {
+  const sig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  for (let i = 0; i < 8; i++) if (buf[i] !== sig[i]) throw new Error('not png');
+  let off = 8, width = 0, height = 0, colorType = 0;
+  const plte = [];
+  let trns = [];
+  const idat = [];
+  while (off < buf.length) {
+    const len = buf.readUInt32BE(off); off += 4;
+    const type = buf.toString('ascii', off, off + 4); off += 4;
+    const data = buf.slice(off, off + len); off += len + 4; // +crc
+    if (type === 'IHDR') {
+      width = data.readUInt32BE(0); height = data.readUInt32BE(4); colorType = data[9];
+    } else if (type === 'PLTE') {
+      for (let i = 0; i < len; i += 3) plte.push([data[i], data[i + 1], data[i + 2]]);
+    } else if (type === 'tRNS') {
+      trns = Array.from(data);
+    } else if (type === 'IDAT') {
+      idat.push(data);
+    } else if (type === 'IEND') break;
+  }
+  const inflated = zlib.inflateSync(Buffer.concat(idat));
+  const bpp = colorType === 3 ? 1 : colorType === 2 ? 3 : 4;
+  const stride = width * bpp;
+  let inOff = 0, prev = null;
+  const rgba = Buffer.alloc(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    const filter = inflated[inOff++];
+    const cur = inflated.slice(inOff, inOff + stride); inOff += stride;
+    const row = Buffer.alloc(stride);
+    for (let i = 0; i < stride; i++) {
+      const left = i >= bpp ? row[i - bpp] : 0;
+      const up = prev ? prev[i] : 0;
+      const upLeft = (prev && i >= bpp) ? prev[i - bpp] : 0;
+      let val;
+      if (filter === 0) val = cur[i];
+      else if (filter === 1) val = cur[i] + left;
+      else if (filter === 2) val = cur[i] + up;
+      else if (filter === 3) val = cur[i] + ((left + up) >> 1);
+      else val = cur[i] + paeth(left, up, upLeft);
+      row[i] = val & 0xff;
+    }
+    for (let x = 0; x < width; x++) {
+      const o = (y * width + x) * 4;
+      if (colorType === 3) {
+        const idx = row[x], p = plte[idx];
+        rgba[o] = p[0]; rgba[o + 1] = p[1]; rgba[o + 2] = p[2];
+        rgba[o + 3] = idx < trns.length ? trns[idx] : 255;
+      } else if (colorType === 2) {
+        rgba[o] = row[x * 3]; rgba[o + 1] = row[x * 3 + 1]; rgba[o + 2] = row[x * 3 + 2]; rgba[o + 3] = 255;
+      } else {
+        rgba[o] = row[x * 4]; rgba[o + 1] = row[x * 4 + 1]; rgba[o + 2] = row[x * 4 + 2]; rgba[o + 3] = row[x * 4 + 3];
+      }
+    }
+    prev = row;
+  }
+  return { width, height, rgba };
+}
+
+// 无损往返:编码 → 解码 → 逐字节比对,必须完全一致
+function assertLosslessRoundTrip(label, w, h, makePixels) {
+  const rgba = makePixels();
+  const png = encodeLosslessPng(w, h, rgba);
+  const dec = decodePng(png);
+  let same = dec.width === w && dec.height === h && dec.rgba.length === rgba.length;
+  if (same) {
+    for (let i = 0; i < rgba.length; i++) {
+      if (dec.rgba[i] !== rgba[i]) { same = false; break; }
+    }
+  }
+  check(same, label + ' 无损往返一致(' + Math.round(png.length / 1024) + 'KB)');
+}
 
 const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'eic-test-'));
 
@@ -22,6 +106,34 @@ function check(cond, label) {
 
 app.whenReady().then(async () => {
   try {
+    // ---- 无损往返单元测试(三条编码路径:调色板 / RGB真彩 / RGBA透明)----
+    assertLosslessRoundTrip('调色板路径', 24, 24, () => {
+      const w = 24, h = 24, rgba = Buffer.alloc(w * h * 4);
+      for (let i = 0; i < w * h; i++) {
+        const o = i * 4, x = i % w, y = (i / w) | 0;
+        if ((x + y) % 3 === 0) { rgba[o] = 255; rgba[o + 1] = 0; rgba[o + 2] = 0; rgba[o + 3] = 255; }
+        else if ((x + y) % 3 === 1) { rgba[o] = 0; rgba[o + 1] = 128; rgba[o + 2] = 255; rgba[o + 3] = 255; }
+        else { rgba[o + 3] = 0; }
+      }
+      return rgba;
+    });
+    assertLosslessRoundTrip('RGB真彩路径', 200, 200, () => {
+      const w = 200, h = 200, rgba = Buffer.alloc(w * h * 4);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const o = (y * w + x) * 4;
+        rgba[o] = x; rgba[o + 1] = y; rgba[o + 2] = (x + y) & 0xff; rgba[o + 3] = 255;
+      }
+      return rgba;
+    });
+    assertLosslessRoundTrip('RGBA透明路径', 120, 120, () => {
+      const w = 120, h = 120, rgba = Buffer.alloc(w * h * 4);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const o = (y * w + x) * 4;
+        rgba[o] = x; rgba[o + 1] = y; rgba[o + 2] = 255 - x; rgba[o + 3] = x;
+      }
+      return rgba;
+    });
+
     // 等窗口与页面加载完成
     await new Promise((r) => setTimeout(r, 1800));
     const win = BrowserWindow.getAllWindows()[0];
@@ -84,7 +196,7 @@ app.whenReady().then(async () => {
       check(sz.width === size && sz.height === size, file + ' 尺寸 ' + sz.width + 'x' + sz.height);
 
       const byteLen = fs.statSync(p).size;
-      check(byteLen < 100 * 1024, file + ' <100KB(实际 ' + (byteLen / 1024).toFixed(1) + 'KB)');
+      console.log('    ' + file + ' ' + (byteLen / 1024).toFixed(1) + 'KB(无损)');
 
       if (type === '圆角') {
         const bmp = img.toBitmap(); // BGRA

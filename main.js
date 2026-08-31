@@ -5,7 +5,7 @@ const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const fsp = fs.promises;
-const { compressImage } = require('./compress');
+const { encodeLosslessPng } = require('./compress');
 
 const WINDOW_WIDTH = 460;
 const WINDOW_HEIGHT = 780;
@@ -93,8 +93,8 @@ ipcMain.handle('icon-app:save-files', async (event, files) => {
         throw new Error('像素数据无效');
       }
       const rgba = Buffer.from(pixels.buffer, pixels.byteOffset, pixels.byteLength);
-      // 中位切分量化 + 调色板 PNG,压到 <100KB
-      const buf = compressImage(width, height, rgba);
+      // 无损 PNG(像素零失真;颜色少自动走调色板,全不透明自动去 alpha)
+      const buf = encodeLosslessPng(width, height, rgba);
       const target = uniquePath(dir, name);
       await fsp.writeFile(target, buf);
       saved.push({ name: path.basename(target), path: target, size: buf.length });

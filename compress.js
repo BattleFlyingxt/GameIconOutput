@@ -1,15 +1,12 @@
-// 游戏图标导出 · PNG 压缩
-// 纯 Node(自带 zlib)实现调色板 PNG 编码 + 中位切分颜色量化。
-// 原理与 pngquant 一致:把颜色压到 ≤256 色再按 8-bit 调色板编码,
-// 图标类图片观感几乎无差,体积却能稳定压到 100KB 以下;
-// 圆角图边缘的柔化(半透明抗锯齿)通过 tRNS 逐色块记录 alpha 保留。
+// 游戏图标导出 · 无损 PNG 压缩
+// 纯 Node(zlib)实现 PNG 编码。原则:像素零失真(无损),同时尽量做小:
+//   - 颜色数 ≤256 的图 → 8-bit 调色板 PNG(颜色精确保留,体积最小)
+//   - 全不透明 → RGB(去掉 alpha 通道,省约 25%)
+//   - 有透明度 → RGBA
+//   每行在 None/Sub/Up/Avg/Paeth 五种过滤器里选最优,再 zlib 最高级别压缩
 'use strict';
 
 const zlib = require('zlib');
-
-const TARGET_BYTES = 100 * 1024; // 每张目标 < 100KB
-// 由多到少逐档试,命中 <100KB 即停;颜色越少压得越狠(对噪点/渐变图兜底)
-const COLOR_LIMITS = [256, 192, 144, 112, 88, 64, 48, 36, 24, 16, 12, 8];
 
 // ------------------------------------------------------------------ CRC32
 const CRC_TABLE = (function () {
@@ -28,7 +25,6 @@ function crc32(buf) {
   return (c ^ 0xffffffff) >>> 0;
 }
 
-// ------------------------------------------------------------------- 分块
 function chunk(type, data) {
   const len = Buffer.alloc(4);
   len.writeUInt32BE(data.length, 0);
@@ -38,122 +34,120 @@ function chunk(type, data) {
   return Buffer.concat([len, typeBuf, data, crc]);
 }
 
-// ------------------------------------------------- 中位切分量化(RGBA)
-// rgba: Uint8ClampedArray(RGBA 顺序,非预乘);count: 像素数
-// 返回 { palette: [{r,g,b,a}], indices: Uint8Array } —— 每个像素直接归属其分桶
-function quantize(rgba, count, maxColors) {
-  let buckets = [new Int32Array(count)];
-  for (let i = 0; i < count; i++) buckets[0][i] = i;
-  let sizes = [count];
-
-  while (buckets.length < maxColors) {
-    // 找范围内最大的可分桶
-    let best = -1, bestRange = -1, bestChan = 0;
-    for (let b = 0; b < buckets.length; b++) {
-      const size = sizes[b];
-      if (size <= 1) continue;
-      const idx = buckets[b];
-      let rMin = 255, rMax = 0, gMin = 255, gMax = 0, bMin = 255, bMax = 0, aMin = 255, aMax = 0;
-      for (let i = 0; i < size; i++) {
-        const o = idx[i] * 4;
-        const r = rgba[o], g = rgba[o + 1], bl = rgba[o + 2], a = rgba[o + 3];
-        if (r < rMin) rMin = r; if (r > rMax) rMax = r;
-        if (g < gMin) gMin = g; if (g > gMax) gMax = g;
-        if (bl < bMin) bMin = bl; if (bl > bMax) bMax = bl;
-        if (a < aMin) aMin = a; if (a > aMax) aMax = a;
-      }
-      const ranges = [rMax - rMin, gMax - gMin, bMax - bMin, aMax - aMin];
-      let chan = 0;
-      for (let c = 1; c < 4; c++) if (ranges[c] > ranges[chan]) chan = c;
-      const range = ranges[chan];
-      if (range === 0) continue; // 桶内颜色一致,不可再分
-      if (range > bestRange) { bestRange = range; best = b; bestChan = chan; }
-    }
-    if (best === -1) break; // 全部分桶到位
-
-    // 沿该通道按中位数对半切
-    const idx = buckets[best];
-    const size = sizes[best];
-    const off = bestChan;
-    const arr = Array.from(idx);
-    arr.sort((x, y) => rgba[x * 4 + off] - rgba[y * 4 + off]);
-    const mid = size >> 1;
-    buckets[best] = Int32Array.from(arr.slice(0, mid));
-    buckets.push(Int32Array.from(arr.slice(mid)));
-    sizes[best] = mid;
-    sizes.push(size - mid);
-  }
-
-  // 每桶平均色即调色板;像素按所属桶直接落索引
-  const palette = [];
-  const indices = new Uint8Array(count);
-  for (let b = 0; b < buckets.length; b++) {
-    const idx = buckets[b];
-    const size = sizes[b];
-    let r = 0, g = 0, bl = 0, a = 0;
-    for (let i = 0; i < size; i++) {
-      const o = idx[i] * 4;
-      r += rgba[o]; g += rgba[o + 1]; bl += rgba[o + 2]; a += rgba[o + 3];
-    }
-    palette.push({ r: Math.round(r / size), g: Math.round(g / size), b: Math.round(bl / size), a: Math.round(a / size) });
-    for (let i = 0; i < size; i++) indices[idx[i]] = b;
-  }
-  return { palette, indices };
+// ------------------------------------------------------------- PNG 过滤器
+// 逐行选最优过滤器,能把平滑渐变/色块压得明显更小(无损前提下的体积优化)
+function paeth(a, b, c) {
+  const p = a + b - c;
+  const pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+  if (pa <= pb && pa <= pc) return a;
+  if (pb <= pc) return b;
+  return c;
 }
 
-// --------------------------------------------------- 调色板 PNG 编码
-// color type 3(8-bit 索引色),全不透明时不写 tRNS,否则逐色块记录 alpha
-function encodePalettePng(width, height, palette, indices) {
+function filterRow(cur, prev, bpp) {
+  const n = cur.length;
+  let best = 0, bestCost = Infinity, bestBytes = null;
+  const out = Buffer.alloc(n);
+  for (let f = 0; f < 5; f++) {
+    let cost = 0;
+    for (let i = 0; i < n; i++) {
+      const x = cur[i];
+      const left = i >= bpp ? cur[i - bpp] : 0;
+      const up = prev ? prev[i] : 0;
+      const upLeft = (prev && i >= bpp) ? prev[i - bpp] : 0;
+      let val;
+      if (f === 0) val = x;                       // None
+      else if (f === 1) val = x - left;           // Sub
+      else if (f === 2) val = x - up;             // Up
+      else if (f === 3) val = x - ((left + up) >> 1); // Avg
+      else val = x - paeth(left, up, upLeft);     // Paeth
+      out[i] = val & 0xff;
+      cost += Math.abs(val);
+    }
+    if (cost < bestCost) { bestCost = cost; best = f; bestBytes = Buffer.from(out); }
+  }
+  return { filter: best, bytes: bestBytes };
+}
+
+// ---------------------------------------------------------- 无损 PNG 编码
+// rgba: RGBA 顺序原始像素(长度 = width*height*4);返回 PNG Buffer
+function encodeLosslessPng(width, height, rgba) {
+  const count = width * height;
+
+  // 统计唯一颜色(RGBA 组合),决定编码形态
+  const colorMap = new Map(); // key -> {r,g,b,a}
+  const order = [];           // 首次出现顺序
+  let allOpaque = true;
+  for (let i = 0; i < count; i++) {
+    const o = i * 4;
+    const key = (rgba[o] << 24) | (rgba[o + 1] << 16) | (rgba[o + 2] << 8) | rgba[o + 3];
+    if (!colorMap.has(key)) { colorMap.set(key, { r: rgba[o], g: rgba[o + 1], b: rgba[o + 2], a: rgba[o + 3] }); order.push(key); }
+    if (rgba[o + 3] !== 255) allOpaque = false;
+  }
+
+  let colorType, bpp, raw, plte = null, trns = null;
+  if (order.length <= 256) {
+    // 颜色本来就不超过 256:精确调色板,无损且最小
+    colorType = 3; bpp = 1;
+    const pal = order.map((k) => colorMap.get(k));
+    plte = Buffer.alloc(pal.length * 3);
+    let hasAlpha = false;
+    for (let i = 0; i < pal.length; i++) {
+      plte[i * 3] = pal[i].r; plte[i * 3 + 1] = pal[i].g; plte[i * 3 + 2] = pal[i].b;
+      if (pal[i].a < 255) hasAlpha = true;
+    }
+    if (hasAlpha) {
+      trns = Buffer.alloc(pal.length);
+      for (let i = 0; i < pal.length; i++) trns[i] = pal[i].a;
+    }
+    const keyToIdx = new Map();
+    order.forEach((k, idx) => keyToIdx.set(k, idx));
+    raw = new Uint8Array(count);
+    for (let i = 0; i < count; i++) {
+      const o = i * 4;
+      raw[i] = keyToIdx.get((rgba[o] << 24) | (rgba[o + 1] << 16) | (rgba[o + 2] << 8) | rgba[o + 3]);
+    }
+  } else if (allOpaque) {
+    colorType = 2; bpp = 3; // RGB,不写 alpha
+    raw = Buffer.alloc(count * 3);
+    for (let i = 0; i < count; i++) {
+      raw[i * 3] = rgba[i * 4]; raw[i * 3 + 1] = rgba[i * 4 + 1]; raw[i * 3 + 2] = rgba[i * 4 + 2];
+    }
+  } else {
+    colorType = 6; bpp = 4; // RGBA 全保留
+    raw = Buffer.from(rgba);
+  }
+
+  // 逐行过滤 → deflate
+  const stride = width * bpp;
+  const filtered = Buffer.alloc(height * (1 + stride));
+  let prev = null;
+  for (let y = 0; y < height; y++) {
+    const cur = raw.subarray(y * stride, (y + 1) * stride);
+    const r = filterRow(cur, prev, bpp);
+    filtered[y * (1 + stride)] = r.filter;
+    r.bytes.copy(filtered, y * (1 + stride) + 1);
+    prev = cur;
+  }
+  const idat = zlib.deflateSync(filtered, { level: 9 });
+
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(width, 0);
   ihdr.writeUInt32BE(height, 4);
   ihdr[8] = 8;   // bit depth
-  ihdr[9] = 3;   // color type: indexed
+  ihdr[9] = colorType;
   ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
 
-  const plte = Buffer.alloc(palette.length * 3);
-  let hasAlpha = false;
-  for (let i = 0; i < palette.length; i++) {
-    plte[i * 3] = palette[i].r;
-    plte[i * 3 + 1] = palette[i].g;
-    plte[i * 3 + 2] = palette[i].b;
-    if (palette[i].a < 255) hasAlpha = true;
+  const parts = [
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr)
+  ];
+  if (colorType === 3) {
+    parts.push(chunk('PLTE', plte));
+    if (trns) parts.push(chunk('tRNS', trns));
   }
-  const trns = hasAlpha ? Buffer.alloc(palette.length) : null;
-  if (trns) for (let i = 0; i < palette.length; i++) trns[i] = palette[i].a;
-
-  // 每行前置 filter type 0(None),8-bit 索引色每像素 1 字节
-  const raw = Buffer.alloc(height * (1 + width));
-  for (let y = 0; y < height; y++) {
-    const rowStart = y * (1 + width);
-    raw[rowStart] = 0;
-    for (let x = 0; x < width; x++) raw[rowStart + 1 + x] = indices[y * width + x];
-  }
-  const idat = zlib.deflateSync(raw, { level: 9 });
-
-  const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  return Buffer.concat([
-    sig,
-    chunk('IHDR', ihdr),
-    chunk('PLTE', plte),
-    ...(trns ? [chunk('tRNS', trns)] : []),
-    chunk('IDAT', idat),
-    chunk('IEND', Buffer.alloc(0))
-  ]);
+  parts.push(chunk('IDAT', idat), chunk('IEND', Buffer.alloc(0)));
+  return Buffer.concat(parts);
 }
 
-// ------------------------------------------------ 入口:压到 <100KB
-// width × height 的 RGBA 像素 → 尽量小的调色板 PNG
-function compressImage(width, height, rgba) {
-  const count = width * height;
-  let best = null;
-  for (const limit of COLOR_LIMITS) {
-    const { palette, indices } = quantize(rgba, count, limit);
-    const buf = encodePalettePng(width, height, palette, indices);
-    best = buf;
-    if (buf.length < TARGET_BYTES) break; // 达标即收手
-  }
-  return best;
-}
-
-module.exports = { compressImage, TARGET_BYTES };
+module.exports = { encodeLosslessPng };
