@@ -6,7 +6,8 @@ const path = require('path');
 const fs = require('fs');
 const fsp = fs.promises;
 const https = require('https');
-const { encodeLosslessPng, encodeProgressivePng } = require('./compress');
+const { encodeLosslessPng } = require('./compress');
+const { pngquantCompress } = require('./pngquant');
 const pkg = require('./package.json');
 
 const APP_TITLE = '游戏图标导出 v' + pkg.version;
@@ -189,8 +190,9 @@ ipcMain.handle('icon-app:save-files', async (event, files, opts) => {
         const rawPng = encodeLosslessPng(width, height, rgba);
         buf = await tinypngShrink(rawPng, apiKey);
       } else {
-        // 离线压缩:TinyPNG 式 PNG,≤256 色无损调色板,>256 色感知量化,保证每张 ≤ 100KB
-        buf = encodeProgressivePng(width, height, rgba).buf;
+        // 离线压缩:调用内置 pngquant(与 Pngyu / TinyPNG 同源),按质量档降级保证每张 ≤ 100KB
+        const rawPng = encodeLosslessPng(width, height, rgba);
+        buf = (await pngquantCompress(rawPng)).buf;
       }
       const target = uniquePath(dir, name);
       await fsp.writeFile(target, buf);

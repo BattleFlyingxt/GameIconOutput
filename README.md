@@ -1,6 +1,6 @@
 # 游戏ICON导出 · 默认各硬核渠道尺寸(OV华米荣)
 
-把游戏 ICON 原图批量导出成**各硬核渠道(OPPO / vivo / 华为 / 小米 / 荣耀)所需的规格尺寸**:直角 216 / 256 / 258 / 320 / 512 + 圆角 222 的 PNG,按「游戏名-尺寸 类型.png」命名。支持**在线压缩(上传 tinypng.com 官方 API)**与**离线压缩(本地 TinyPNG 式量化)**两种方式,**默认在线**。
+把游戏 ICON 原图批量导出成**各硬核渠道(OPPO / vivo / 华为 / 小米 / 荣耀)所需的规格尺寸**:直角 216 / 256 / 258 / 320 / 512 + 圆角 222 的 PNG,按「游戏名-尺寸 类型.png」命名。支持**在线压缩(上传 tinypng.com 官方 API)**与**离线压缩(内置 pngquant)**两种方式,**默认在线**。
 
 基于 Electron 的独立桌面软件,支持 **Windows** 与 **macOS**,不依赖任何运行时。
 
@@ -11,13 +11,12 @@
 - 勾选需要的规格(默认全选):直角 216 / 256 / 258 / 320 / 512 + 圆角 222
 - 导出后选择保存目录,一次性批量写入全部 PNG;**记住上次导出的目录**,下次保存框自动在它上面打开
 - **在线压缩(默认)**:先把原图裁切成目标规格,无损上传到 tinypng.com 官方 API 压缩,再把压缩结果下载到选定目录 —— 画质与 tinypng.com 网页版完全一致
-- **离线压缩**:不依赖网络,本地用 TinyPNG 式量化,保证每张 ≤100KB
+- **离线压缩**:不依赖网络,本地调用**内置 pngquant**(与 Pngyu、TinyPNG 同源的量化器),保证每张 ≤100KB
 - 两种模式在软件内一键切换,默认【在线压缩】;模式与 API Key 保存在本机,下次启动自动恢复
 - 在线压缩需填一个 **TinyPNG 免费 API Key**(每月 500 张免费);点「获取免费 Key」直达 tinypng.com/developers 申请,Key 仅保存在本机
 - 直角 = 内容填满整个分辨率;圆角 = 内容切成正圆形、圆外透明
-- 离线压缩方式**只采用 tinypng.com 的方法**:颜色数 ≤256 的图用精确调色板(像素无损);颜色数 >256 的图一律做感知量化,从 256 色逐级降到 ≤100KB,不再走无损 RGB/RGBA 真彩 —— 所以任何图片都有可预期的压缩结果,没有"无损优先但压不掉"的中间态,每张保证 ≤100KB
-- 量化采用 **TinyPNG / pngquant 同款思路**:感知色彩空间(γ≈2.2)+ 亮度加权距离、K-means 调色板精修、**选择性抖动**(只抖颜色不抖透明,纯色区几乎无噪点、渐变区不色带)、调色板瘦身、deflate 多策略择优 —— 同体积下画质明显更好
-- **窗口标题与页头显示当前版本号**(如「游戏图标导出 v1.0.8」),发新版本时自动跟随 package.json
+- 离线压缩**直接调用内置 pngquant**(与 Pngyu、TinyPNG 同源的量化器)以独立 CLI 子进程方式运行:先无损编码,再交给 pngquant 压成 8-bit 调色板 PNG(Floyd–Steinberg 抖动),按感知质量档逐档降级,最后一档还压不下就限死颜色数兜底 —— 任何图片都有可预期的压缩结果,每张保证 ≤100KB
+- **窗口标题与页头显示当前版本号**(如「游戏图标导出 v1.0.9」),发新版本时自动跟随 package.json
 - 结果卡片可查看大图、打开所在目录
 - 自动适配系统深色 / 浅色主题
 
@@ -85,14 +84,16 @@ build/icon.png      应用图标
 .github/workflows/build.yml        push 到 main 时双平台自动构建(Artifacts)
 .github/workflows/release.yml      打 v* 标签时出包并发布到 Releases
 .github/workflows/version-bump.yml 手动触发,升级版本号并打标签
-compress.js         TinyPNG 式 PNG 编码(≤256 色无损调色板,>256 色感知量化压到 ≤100KB)
+pngquant.js         离线压缩:pngquant 封装(质量档迭代压到 ≤100KB)
+vendor/pngquant/    随包分发的 pngquant 二进制(GPL-3.0,与 Pngyu 同款做法;Windows 2.17.0 / macOS 3.0.3)
+compress.js         无损 PNG 编码(在线压缩喂入 + 离线压缩的 pngquant 输入)
 verify.js           自动化验证脚本
 ```
 
 ## 技术要点
 
 - 像素级处理在渲染层用浏览器 Canvas 完成(cover 等比缩放 + 圆形蒙版裁切);
-- 编码在主进程用纯 Node(zlib)实现,策略与 tinypng.com 一致:颜色数 ≤256 走精确调色板(按色数压位深 1/2/4/8,全不透明去 alpha);颜色数 >256 一律感知量化 —— **浮点 γ≈2.2 感知空间**(`Math.pow` 代替 8bit 查表,消除线性↔gamma 往返取整误差)4D 中位切分初始化 + K-means 浮点中心精修;**选择性抖动**:先算像素到最近调色板色的距离生成重要性图(1/4 分辨率 + 盒式模糊 + 归一化 + 双线性放大),误差按重要性缩放后走蛇形扫描 Floyd–Steinberg(奇数行反向),误差过大钳制、过小当噪声丢弃,只抖 RGB 不抖透明 —— 纯色区几乎零噪点,渐变区防色带;每档先试抖动再试不抖动,从 256 色逐级压到 ≤100KB 即停,调色板瘦身 + deflate 多策略择优;不再做无损 RGB/RGBA 真彩输出;
+- 离线压缩在主进程把无损 PNG 经 stdin 喂给**内置 pngquant**(独立 CLI 子进程,stdout 取回结果):按感知质量档 `85-100 → 70-95 → 55-90 → 40-85 → 20-80` 逐档降级,仍超 100KB 就 `0-70` 关抖动,再超就限死颜色数(`--nofs 16/8/4/2`)硬压兜底 —— 保证每张 ≤100KB;pngquant 以 GPL-3.0 等双许可随包分发(vendor/pngquant/,与 Pngyu 同款做法),代码不改写、不链接,调用方式与 Pngyu 一致;
 - 在线压缩在主进程用纯 Node `https` 调 tinypng.com 官方 API:先本地 `encodeLosslessPng` 无损编码,POST 到 `api.tinypng.com/shrink`(Basic 认证),从响应 `Location` 头下载压缩结果;**串行上传**避免限流;错误分类提示(Key 无效 / 月配额用尽 / 网络异常);
 - 配置(模式 / API Key / 上次导出目录)持久化到 `userData/config.json`,原子写(temp + rename);保存对话框 `defaultPath` 用上次目录,导出成功后写回;
 - 渲染层启用 `contextIsolation` + 关闭 `nodeIntegration` + CSP,与主进程只经 preload 暴露的 `saveFiles` / `showInFolder` / `getConfig` / `setConfig` / `openExternal` 能力通信;

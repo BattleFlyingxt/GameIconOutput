@@ -101,6 +101,12 @@ body {
   gap: 6px;
 }
 
+/* 作者样式的 display:flex 会覆盖 UA 的 [hidden] { display:none },
+   必须显式声明,否则切到离线压缩时 API key 输入框仍显示 */
+.api-key-row[hidden] {
+  display: none;
+}
+
 .api-key-row input[type="password"] {
   flex: 1;
   min-width: 0;

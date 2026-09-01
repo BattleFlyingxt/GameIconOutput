@@ -7,7 +7,9 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const zlib = require('zlib');
-const { encodeLosslessPng, encodeProgressivePng } = require('./compress');
+const { spawn } = require('child_process');
+const { encodeLosslessPng } = require('./compress');
+const { pngquantCompress, pngquantPath } = require('./pngquant');
 
 // 最小 PNG 解码器(仅支持我们编码出的:colortype 2/3/6,bitdepth 1/2/4/8,interlace 0)
 function paeth(a, b, c) {
@@ -167,37 +169,33 @@ app.whenReady().then(async () => {
       return rgba;
     });
 
-    // 渐进式:≤256 色的必须保持无损;>256 色的走 TinyPNG 式量化压到 ≤100KB
+    // pngquant 压缩:8-bit 调色板 + Floyd–Steinberg 抖动,按质量档逐档降级压到 ≤100KB
     // 且量化痕迹(与原图逐像素平均色差)必须小,否则就是肉眼可见的压缩痕迹
-    function assertProgressive(label, w, h, makePixels, expectMode, maxAvgErr) {
+    async function assertQuantized(label, w, h, makePixels, maxAvgErr) {
       const rgba = makePixels();
-      const enc = encodeProgressivePng(w, h, rgba);
+      const raw = encodeLosslessPng(w, h, rgba);
+      const enc = await pngquantCompress(raw);
       const okSize = enc.buf.length <= 100 * 1024;
-      check(okSize, label + ' 体积 ≤100KB(实际 ' + (enc.buf.length / 1024).toFixed(1) + 'KB)');
-      if (expectMode) check(enc.mode === expectMode, label + ' mode=' + enc.mode + '(期望 ' + expectMode + ')');
-      if (enc.mode === 'quantized') {
-        check(enc.colors <= 256, label + ' 量化色数 ≤256(实际 ' + enc.colors + ')');
-      }
-      if (maxAvgErr) {
-        const dec = decodePng(enc.buf);
-        let sum = 0, n = 0;
-        for (let i = 0; i < rgba.length; i += 4) {
-          if (rgba[i + 3] === 0) continue; // 只看可见像素
-          sum += Math.abs(dec.rgba[i] - rgba[i]) + Math.abs(dec.rgba[i + 1] - rgba[i + 1]) + Math.abs(dec.rgba[i + 2] - rgba[i + 2]);
-          n++;
-        }
-        const avgErr = n ? sum / (n * 3) : 0;
-        check(avgErr <= maxAvgErr, label + ' 量化痕迹小(平均色差 ' + avgErr.toFixed(2) + ' ≤' + maxAvgErr + ')');
-      }
+      check(okSize, label + ' 体积 ≤100KB(实际 ' + (enc.buf.length / 1024).toFixed(1) + 'KB,档位 ' + enc.tier + ')');
       try {
         const dec = decodePng(enc.buf);
         check(dec.width === w && dec.height === h, label + ' 解码尺寸正确');
+        if (maxAvgErr) {
+          let sum = 0, n = 0;
+          for (let i = 0; i < rgba.length; i += 4) {
+            if (rgba[i + 3] === 0) continue; // 只看可见像素
+            sum += Math.abs(dec.rgba[i] - rgba[i]) + Math.abs(dec.rgba[i + 1] - rgba[i + 1]) + Math.abs(dec.rgba[i + 2] - rgba[i + 2]);
+            n++;
+          }
+          const avgErr = n ? sum / (n * 3) : 0;
+          check(avgErr <= maxAvgErr, label + ' 量化痕迹小(平均色差 ' + avgErr.toFixed(2) + ' ≤' + maxAvgErr + ')');
+        }
       } catch (e) {
         check(false, label + ' 解码失败: ' + (e && e.message));
       }
     }
-    // 平滑渐变(>256 色):现在一律走 TinyPNG 式量化,但必须色差小到几乎不可见
-    assertProgressive('渐变图(TinyPNG式量化)', 512, 512, () => {
+    // 平滑渐变(>256 色):pngquant 高画质档必须色差小到几乎不可见
+    await assertQuantized('渐变图(pngquant)', 512, 512, () => {
       const w = 512, h = 512, rgba = Buffer.alloc(w * h * 4);
       for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
         const o = (y * w + x) * 4;
@@ -205,9 +203,9 @@ app.whenReady().then(async () => {
         rgba[o + 2] = ((x + y) * 128 / (w + h)) | 0; rgba[o + 3] = 255;
       }
       return rgba;
-    }, 'quantized', 8);
-    // 全随机噪声:无损必然超 100KB → 渐进式必须降色压到 ≤100KB 且解码正常
-    assertProgressive('全随机噪声(需降色兜底)', 512, 512, () => {
+    }, 8);
+    // 全随机噪声:高画质档必然超 100KB → 必须自动降档压到 ≤100KB 且解码正常
+    await assertQuantized('全随机噪声(需降档兜底)', 512, 512, () => {
       const w = 512, h = 512, rgba = Buffer.alloc(w * h * 4);
       let s = 0x12345678;
       for (let i = 0; i < w * h; i++) {
@@ -220,8 +218,8 @@ app.whenReady().then(async () => {
       }
       return rgba;
     });
-    // 带透明(圆角)的噪点图:量化兜底不能把透明边缘画脏
-    assertProgressive('带透明噪点图(需降色兜底)', 256, 256, () => {
+    // 带透明(圆角)的噪点图:降档兜底不能把透明边缘画脏
+    await assertQuantized('带透明噪点图(需降档兜底)', 256, 256, () => {
       const w = 256, h = 256, rgba = Buffer.alloc(w * h * 4);
       let s = 0xabcdef01;
       for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
@@ -236,8 +234,8 @@ app.whenReady().then(async () => {
       }
       return rgba;
     });
-    // 渐变 + 局部噪点:无损超预算 → 应走抖动量化;抖动输出必须可解码,体积不超
-    assertProgressive('渐变+噪点图(应触发抖动量化)', 384, 384, () => {
+    // 渐变 + 局部噪点:高画质档可能压不下 → 应自动降档,输出必须可解码、体积不超
+    await assertQuantized('渐变+噪点图(应自动降档)', 384, 384, () => {
       const w = 384, h = 384, rgba = Buffer.alloc(w * h * 4);
       let s = 0x0f1e2d3c;
       for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
@@ -258,6 +256,31 @@ app.whenReady().then(async () => {
     await new Promise((r) => setTimeout(r, 1800));
     const win = BrowserWindow.getAllWindows()[0];
     if (!win) throw new Error('窗口未创建');
+
+    // ---- 内置 pngquant 二进制检查 ----
+    const pqPath = pngquantPath();
+    check(fs.existsSync(pqPath), '内置 pngquant 二进制存在: ' + pqPath);
+    await new Promise((resolve) => {
+      const child = spawn(pqPath, ['--version'], { windowsHide: true });
+      let v = '';
+      child.stdout.on('data', (c) => v += c);
+      child.on('close', (code) => {
+        // 2.x 的 --version 只输出 "2.17.0 (September 2021)",没有 pngquant 字样
+        check(code === 0 && /^\s*\d+\.\d+\.\d+/.test(v), 'pngquant --version 可执行: ' + (v || '').trim());
+        resolve();
+      });
+      child.on('error', () => { check(false, 'pngquant --version 启动失败'); resolve(); });
+    });
+
+    // ---- Bug 回归:切到离线压缩后,API key 输入框必须真正隐藏(计算样式断言,
+    //      能拦住"作者样式 display:flex 覆盖 UA [hidden]"这类回归) ----
+    const keyRowHidden = await win.webContents.executeJavaScript(`(() => {
+      document.querySelector('#modeSwitch .mode-btn[data-mode="offline"]').click();
+      const row = document.getElementById('apiKeyRow');
+      return { hidden: row.hidden, display: getComputedStyle(row).display };
+    })()`);
+    check(keyRowHidden.hidden && keyRowHidden.display === 'none',
+      '切到离线压缩后 API key 输入框隐藏(display=' + keyRowHidden.display + ')');
 
     // 收集渲染层报错
     win.webContents.on('console-message', (e, level, message) => {
