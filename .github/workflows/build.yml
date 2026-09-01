@@ -35,6 +35,19 @@ jobs:
       - name: Build installer
         run: npx electron-builder ${{ matrix.args }} --publish never
 
+      # macOS 深度校验(与 Gatekeeper 首次打开下载的 app 时同款检查):
+      # 包内任何代码(含 extraResources 的 pngquant)签名不完整都会让用户看到
+      # 「App 已损坏」打不开 —— 校验不过就让构建失败,不许发坏包。
+      - name: Verify macOS code signature
+        if: runner.os == 'macOS'
+        run: |
+          APP=$(find dist -maxdepth 3 -name '*.app' | head -1)
+          echo "APP=$APP"
+          codesign --verify --deep --strict "$APP"
+          echo '== 深度校验通过 =='
+          codesign -dv "$APP" 2>&1 | grep -E 'Signature|Identifier' || true
+          spctl --assess --type execute "$APP" 2>&1 || echo '(spctl 拒绝 = 未公证,预期行为,用户端按 README 指引打开即可)'
+
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:

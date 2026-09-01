@@ -16,7 +16,7 @@
 - 在线压缩需填一个 **TinyPNG 免费 API Key**(每月 500 张免费);点「获取免费 Key」直达 tinypng.com/developers 申请,Key 仅保存在本机
 - 直角 = 内容填满整个分辨率;圆角 = 内容切成正圆形、圆外透明
 - 离线压缩**直接调用内置 pngquant**(与 Pngyu、TinyPNG 同源的量化器)以独立 CLI 子进程方式运行:先无损编码,再交给 pngquant 压成 8-bit 调色板 PNG(Floyd–Steinberg 抖动),按感知质量档逐档降级,最后一档还压不下就限死颜色数兜底 —— 任何图片都有可预期的压缩结果,每张保证 ≤100KB
-- **窗口标题与页头显示当前版本号**(如「游戏图标导出 v1.0.9」),发新版本时自动跟随 package.json
+- **窗口标题与页头显示当前版本号**(如「游戏图标导出 v1.0.10」),发新版本时自动跟随 package.json
 - 结果卡片可查看大图、打开所在目录
 - 自动适配系统深色 / 浅色主题
 
@@ -66,7 +66,14 @@ npx electron verify.js
 本项目的安装包未做代码签名(签名需要付费开发者证书),安装时系统会提示"不明来源",属正常现象:
 
 - **Windows**:运行安装包时如出现 SmartScreen 提示,点「更多信息」→「仍要运行」。
-- **macOS**:首次打开 .dmg 后,若提示"无法验证开发者",在「系统设置 → 隐私与安全性」里点「仍要打开」。
+- **macOS**:首次打开 .dmg 后,若提示"无法验证开发者",在「系统设置 → 隐私与安全性」里点「仍要打开」;若提示 **「App 已损坏,代码与原始签名不匹配」**(未公证应用在新版 macOS 的常见误报),在终端运行下面一行即可正常打开(应用本身没坏):
+
+  ```bash
+  xattr -dr com.apple.quarantine "/Applications/GameIconExport.app"
+  open "/Applications/GameIconExport.app"
+  ```
+
+  > 说明:本项目应用未购买付费 Apple 开发者证书,只做了 ad-hoc 签名、无法公证,所以从网页下载后 Gatekeeper 会拦一道。要彻底免掉这个提示需要开发者证书 + 公证(每年 ¥688)。
 
 ## 更换应用图标
 
@@ -81,6 +88,7 @@ index.html          界面结构
 renderer.js         拖放、Canvas 缩放/圆形裁切、PNG 无损编码、导出流程
 renderer.css        界面样式(深浅色自适应)
 build/icon.png      应用图标
+build/afterSign.js  macOS 构建后钩子:显式签名 extraResources 里的 pngquant,重签 app 包
 .github/workflows/build.yml        push 到 main 时双平台自动构建(Artifacts)
 .github/workflows/release.yml      打 v* 标签时出包并发布到 Releases
 .github/workflows/version-bump.yml 手动触发,升级版本号并打标签
